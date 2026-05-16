@@ -1,0 +1,8 @@
+transformers>=4.54.0
+datasets
+peft
+bitsandbytes
+accelerate
+trl
+tensorboard
+sentencepiece

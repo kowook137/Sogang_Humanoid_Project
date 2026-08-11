@@ -1,4 +1,4 @@
-# 휴머노이드 낙상 감지 개발 현황 및 계획
+# 현서 담당 낙상 감지 개발 이력 및 계획
 
 최종 갱신일: 2026-08-11
 
@@ -29,7 +29,8 @@ Sogang_Humanoid_Project/
 ├── Berkeley-Humanoid-Lite/  # 휴머노이드 플랫폼 및 보행 관련 코드
 ├── exaone_finetuning/       # 대화형 LLM 파인튜닝 관련 코드
 ├── openpose/                # CMU OpenPose 1.7.0 소스
-└── EXPLAIN.md               # 본 문서
+├── README.md                # 팀 전체가 공유할 프로젝트 핵심 안내
+└── HISTORY_AND_PLAN_HYEONSEO.md  # 현서 담당 작업의 상세 이력과 계획
 ```
 
 `openpose/`는 CMU OpenPose 1.7.0 소스 트리다. 주요 구성은 다음과 같다.
@@ -114,18 +115,11 @@ pandas: 2.3.3
 scikit-learn: 1.7.2
 ```
 
-현재 PC의 Python 인터프리터:
-
-```text
-C:\Users\PC1111\miniconda3\envs\fall-detection\python.exe
-```
-
-VS Code에서는 위 경로를 Python 인터프리터로 선택한다. Jupyter 커널은 `Python (fall-detection)`이라는 이름으로 등록되어 있다.
+현재 PC에서는 Conda의 `fall-detection` 환경을 사용한다. VS Code에서는 해당 환경의 Python 인터프리터를 선택하고, Jupyter에서는 `Python (fall-detection)` 커널을 선택한다.
 
 환경 활성화:
 
 ```powershell
-& C:\Users\PC1111\miniconda3\Scripts\activate.ps1
 conda activate fall-detection
 ```
 
@@ -234,9 +228,9 @@ keypoints.shape == (number_of_people, 25, 3)
 
 이 인터페이스를 유지하면 Jetson에서 OpenPose 빌드가 어렵거나 성능이 부족할 때 PoseEstimator만 TensorRT 기반 경량 모델로 교체할 수 있다.
 
-## 6. 바로 다음에 구현할 최소 파이프라인
+## 6. 구현된 최소 파이프라인
 
-아직 LSTM/TCN 학습이나 최종 낙상 임곗값 결정부터 시작하지 않는다. 다음 최소 파이프라인을 먼저 완성한다.
+아직 LSTM/TCN 학습이나 최종 낙상 임곗값 결정부터 시작하지 않는다. 다음 최소 파이프라인을 먼저 구현하고 두 테스트 영상으로 검증했다.
 
 ```text
 입력 MP4
@@ -253,26 +247,41 @@ keypoints.shape == (number_of_people, 25, 3)
 keypoints.shape == (frame_count, 25, 3)
 ```
 
-OpenPose로 영상과 JSON을 출력하는 기본 명령:
+영상과 JSON을 출력하는 기본 명령:
 
 ```powershell
-cd openpose\openpose-portable\openpose
-
-.\bin\OpenPoseDemo.exe `
-  --video "<입력 MP4 경로>" `
-  --model_folder .\models `
-  --model_pose BODY_25 `
-  --number_people_max 1 `
-  --write_video "<결과 MP4 경로>" `
-  --write_json "<JSON 출력 폴더>" `
-  --display 0
+python fall_detection/process_video.py `
+  --input "<입력 MP4 경로>" `
+  --output-dir "<출력 폴더>"
 ```
 
-다음 구현 파일은 경로를 하드코딩하지 않고 CLI 인자를 받도록 작성한다.
+구현 파일은 경로를 하드코딩하지 않고 CLI 인자를 받는다.
 
 ```text
 python <script>.py --input <video> --output-dir <directory>
 ```
+
+구현 위치:
+
+```text
+fall_detection/process_video.py
+```
+
+검증 결과:
+
+```text
+p01_fall_side_001
+- 원본/JSON/NPZ/렌더링: 521 frames
+- keypoints shape: (521, 25, 3)
+- 사람 검출: 521/521 frames
+
+p01_normal_walk_sit_001
+- 원본/JSON/NPZ/렌더링: 753 frames
+- keypoints shape: (753, 25, 3)
+- 사람 검출: 753/753 frames
+```
+
+휴대폰 세로 영상의 회전 메타데이터를 OpenPose가 무시하는 문제와 Windows OpenPose가 MP4를 직접 기록하지 못하는 문제도 처리 스크립트에서 자동 보정한다.
 
 ## 7. 데이터 수집 및 라벨링 계획
 
@@ -432,16 +441,126 @@ tmp/
 - 반드시 GitHub로 공유해야 하면 Git LFS 검토
 - 개인정보가 포함된 영상은 공개 저장소에 업로드하지 않음
 
-## 11. 향후 작업 체크리스트
+## 11. 사용자가 해야 할 일
 
-### 즉시 수행
+현재 테스트 영상 2개와 OpenPose 처리 결과가 준비되었으므로, 당장 영상을 수백 개 촬영할 필요는 없다. 먼저 두 영상으로 규칙 기반 낙상 감지기를 구현하고 실제로 구분 가능한지 확인한다.
 
-- [ ] 낙상/정상 테스트 MP4 한 개 이상 준비
-- [ ] MP4에서 골격 결과 MP4와 BODY_25 JSON 생성
-- [ ] OpenPose JSON 파서 구현
-- [ ] `(frames, 25, 3)` NPZ 저장 구현
-- [ ] confidence 및 누락 관절 처리 구현
-- [ ] 주요 관절 궤적 시각화
+### 지금 해야 할 일
+
+1. 현재 원본 영상 2개를 삭제하거나 편집하지 않고 보관한다.
+
+```text
+data/raw_videos/p01_normal_walk_sit_001.mp4
+data/raw_videos/p01_fall_side_001.mp4
+```
+
+2. 최종 하드웨어 정보를 확인한다.
+
+- Depth Camera의 정확한 제품명
+- Jetson Orin Nano의 메모리 용량(4GB/8GB)
+- 카메라를 로봇에 장착할 예상 높이
+- 카메라의 예상 하향 각도
+- 보행 코드가 ROS 1 또는 ROS 2 중 무엇을 사용하는지
+- JetPack 또는 Ubuntu 버전이 이미 정해졌는지
+
+3. 이전 낙상 감지 구현 자료가 남아 있는지 팀원에게 확인한다.
+
+- AUROC 87%를 계산한 코드 또는 노트북
+- 기존 OpenPose/Depth Camera 코드
+- 학습 및 테스트 영상
+- keypoint JSON/CSV/NPZ
+- 가중치와 임곗값
+- ROC 곡선과 평가 결과
+- Jetson 및 ROS 실행 스크립트
+
+자료가 없다면 현재 코드로 새로 구현한다.
+
+4. 다음 규칙 기반 프로토타입이 완성될 때까지 추가 촬영은 잠시 보류한다. 프로토타입에서 오탐과 미탐 원인을 확인한 뒤 필요한 동작을 중심으로 촬영해야 데이터 낭비를 줄일 수 있다.
+
+### 규칙 기반 프로토타입 이후 해야 할 일
+
+첫 프로토타입이 정상적으로 작동하면 총 30~60개의 소규모 검증 데이터를 준비한다.
+
+```text
+정상 영상: 20~40개
+낙상 영상: 10~20개
+촬영 인원: 3~5명
+영상 길이: 약 5~15초
+```
+
+정상 동작에는 서기, 걷기뿐 아니라 낙상과 혼동하기 쉬운 다음 동작을 포함한다.
+
+- 빠르게 의자에 앉기
+- 물건 줍기
+- 허리 숙이기
+- 무릎 꿇기
+- 바닥이나 침대에 자발적으로 눕기
+- 누웠다가 다시 일어나기
+- 카메라 밖으로 이동하기
+
+낙상 동작에는 다음 유형을 포함한다.
+
+- 앞으로 넘어짐
+- 뒤로 넘어짐
+- 좌우로 넘어짐
+- 걷다가 넘어짐
+- 천천히 주저앉음
+- 넘어진 뒤 움직이지 않음
+- 넘어진 뒤 다시 일어남
+
+낙상 영상은 안전 매트, 보호 장비, 보조자가 준비된 상태에서 연출된 동작으로만 촬영한다. 고령자나 낙상 위험이 있는 사람에게 실제 낙상 동작을 요청하지 않는다.
+
+### 학습 모델 단계에서 해야 할 일
+
+규칙 기반 결과를 확인한 뒤 GRU/LSTM/TCN 학습용으로 총 300~500개를 목표로 확장한다.
+
+```text
+정상 영상: 200~300개
+낙상 영상: 100~200개
+촬영 인원: 최소 10명
+```
+
+동일한 사람의 영상이 학습과 테스트에 동시에 포함되지 않도록 사람 ID를 정확히 기록한다. 새 영상을 추가할 때 다음 파일명 규칙을 사용한다.
+
+```text
+p<사람번호>_<normal|fall>_<동작>_<순번>.mp4
+
+예시:
+p02_normal_pickup_001.mp4
+p02_normal_fast_sit_001.mp4
+p03_fall_forward_001.mp4
+p03_fall_backward_001.mp4
+```
+
+영상은 편집하지 않은 원본으로 `data/raw_videos/`에 넣는다. 코드에서 파생 영상과 keypoint를 별도로 생성하므로 원본을 덮어쓰지 않는다.
+
+### 사용자가 하지 않아도 되는 일
+
+다음 작업은 코드와 자동화 파이프라인에서 처리한다.
+
+- 영상 방향과 코덱 변환
+- OpenPose 일괄 실행
+- 골격 영상과 JSON 생성
+- JSON을 NPZ로 변환
+- 좌표 정규화와 특징 계산
+- 규칙 기반 낙상 감지 구현
+- 학습 및 평가 코드 구현
+- 데이터 증가에 따른 성능 변화 측정
+- 실시간 카메라 감지 코드 구현
+- Jetson/ROS 통합 인터페이스 구현
+
+현재 사용자가 바로 준비할 것은 **최종 카메라·Jetson·ROS 정보와 기존 낙상 코드의 존재 여부**다. 추가 영상은 규칙 기반 프로토타입을 확인한 뒤 촬영한다.
+
+## 12. 향후 작업 체크리스트
+
+### 최소 파이프라인 - 완료
+
+- [x] 낙상/정상 테스트 MP4 한 개 이상 준비
+- [x] MP4에서 골격 결과 MP4와 BODY_25 JSON 생성
+- [x] OpenPose JSON 파서 구현
+- [x] `(frames, 25, 3)` NPZ 저장 구현
+- [x] confidence 및 누락 관절 처리 구현
+- [x] 주요 관절 및 골격 렌더링 시각 검증
 
 ### 규칙 기반 감지
 
@@ -473,7 +592,7 @@ tmp/
 - [ ] 이동 중 감지 또는 ego-motion 보정 검토
 - [ ] 실제 돌봄 시나리오 기반 안전 검증
 
-## 12. 다음 작업의 완료 기준
+## 13. 다음 작업의 완료 기준
 
 다음 개발 단계는 아래 조건이 모두 충족되면 완료로 본다.
 

@@ -1,0 +1,16 @@
+# Local datasets and generated outputs
+**/data/raw_videos/
+**/fall_dataset/
+labels.csv
+participants.csv
+outputs/
+tmp/
+
+# Downloaded OpenPose Windows binaries and generated build files
+openpose/openpose-portable/
+openpose/build/
+
+# Python environments and caches
+**/.venv/
+**/__pycache__/
+*.py[cod]

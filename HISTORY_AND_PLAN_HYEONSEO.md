@@ -792,3 +792,35 @@ fall_detection/run_live.bat
 - Windows OpenPose 실행 방식은 Jetson에 직접 이식할 수 없음
 
 따라서 현 단계의 정확한 표현은 학습 모델 완성이 아니라 **초기 데이터로 규칙 기반 낙상 기준선을 구현하고 개발 세트에 맞춰 임곗값을 조정한 상태**다.
+
+## 17. Linux 작업 재개 준비
+
+작업일: 2026-08-12
+
+Windows 포터블 실행 경로에 고정되어 있던 영상 및 실시간 파이프라인을 Linux에서도 사용할 수 있도록 실행 계층을 분리했다. `--openpose-root`를 생략하면 저장소의 Linux 빌드 `openpose/build/examples/openpose/openpose.bin`을 먼저 찾고, 없으면 Windows 포터블 `OpenPoseDemo.exe`를 찾는다. OpenPose 소스 루트 또는 빌드 디렉터리를 직접 지정할 수도 있다.
+
+경로 탐색과 핵심 keypoint 처리를 실제 OpenPose 없이 검증하는 `unittest`도 추가했다. 현재 Linux 환경에는 OpenPose 빌드와 BODY_25 모델이 없고 WSL GPU 접근도 확인되지 않았으므로, 다음 단계는 GPU·카메라가 노출되는 환경을 확정하고 Linux OpenPose를 빌드하여 녹화 영상 1개를 종단 간 처리하는 것이다.
+
+OpenPose 빌드와 별개로 Linux에서 즉시 검증 가능한 YOLO11n pose 백엔드도 추가했다. COCO 17관절을 기존 BODY_25 기반 특징 입력으로 변환하며 녹화 영상과 카메라 번호를 동일한 실행기로 처리한다. WSL CPU에서 저장소 샘플 영상 120프레임을 실제 추론한 결과 약 20.2 FPS였고, 첫 3프레임에서 1~2명의 자세와 최대 17개 관절 검출을 확인했다. 결과 영상도 120프레임으로 정상 생성됐다.
+
+동일 환경에서 카메라 0번 열기를 시도했지만 `/dev/video0`와 WSL GPU 장치 `/dev/dxg`가 존재하지 않아 장치를 열 수 없었다. 따라서 모델과 웹캠 연결 코드는 준비됐지만 실제 카메라 구동 완료를 위해서는 Windows 웹캠을 WSL USB 장치로 전달하거나 실물 Linux 컴퓨터에서 실행해야 한다.
+
+이후 Windows에 `usbipd-win 5.3.0`을 설치하고 Logitech HD Pro Webcam C920(BUSID `2-7`)만 공유해 WSL에 연결했다. WSL 커널이 UVC 장치와 `/dev/video0`, `/dev/video1`을 인식했고 V4L2에서 640×480 스트리밍 기능을 확인했다. 기본 YUYV는 timeout이 발생해 MJPEG 640×480 15 FPS를 요청하도록 실행기를 수정했다. 실제 웹캠 10프레임을 YOLO pose 파이프라인으로 처리하고 640×480 결과 MP4를 생성·재디코딩하는 데 성공했다. 다만 USB/IP 전송에서 실제 처리 속도는 약 0.4 FPS였고 손상 JPEG 경고도 발생했다. 모델 통합 검증에는 성공했지만 실시간 운용 성능을 위해서는 네이티브 Linux/Jetson 또는 더 안정적인 카메라 전달 방식이 필요하다.
+
+## 18. Windows YOLO pose GPU 실시간 검증
+
+작업일: 2026-08-12
+
+Linux `.venv`의 실험용 `torch 2.13.0+cu130`을 공식 CUDA 12.4 조합인 `torch 2.5.1+cu124`, `torchvision 0.20.1+cu124`로 교체했다. 현재 Codex WSL 세션은 운영체제 정책으로 `/dev/dxg`와 `/dev/video*`가 노출되지 않아 WSL 안에서는 CUDA를 사용할 수 없지만, Windows 네이티브 환경은 다음과 같이 정상임을 확인했다.
+
+```text
+GPU: NVIDIA GeForce RTX 2070 SUPER 8GB
+Driver: 560.94
+Windows Conda: fall-detection
+PyTorch: 2.5.0+cu124
+torch.cuda.is_available(): True
+```
+
+Windows Conda 환경에 `ultralytics 8.4.118`을 설치하고 저장소 샘플 영상 60프레임을 GPU 0에서 처리했다. 이어서 Windows 카메라 0번을 640×480으로 열어 GPU 포즈 추론, 규칙 기반 상태 머신, 주석 MP4 저장까지 60프레임 종단 간 검증했다. 생성 영상은 MPEG-4 640×480, 60프레임이며 화면에 표시된 처리 FPS는 약 15.7이었다. 당시 카메라 화면에 전신 사람이 없었으므로 상태가 `UNKNOWN`인 것은 정상이다.
+
+`yolo_pose.py`에는 CUDA 자동 선택, 잘못된 GPU 요청의 조기 진단, 녹화 영상을 가상 웹캠처럼 반복하는 `--loop --realtime` 옵션을 추가했다. `run_yolo_gpu.bat`은 Windows에서 기본 카메라 0과 GPU 0으로 즉시 실행한다. 단위 테스트는 정적 자세, 관절 대응, 장치 인자, 합성 낙상 시퀀스의 `FALLEN` 전이를 포함해 8개가 통과했다.

@@ -18,6 +18,8 @@ from typing import Any
 import cv2
 import numpy as np
 
+from openpose_runtime import OpenPoseRuntime, find_openpose
+
 
 BODY_25_COUNT = 25
 BODY_25_NAMES = (
@@ -148,26 +150,17 @@ def ensure_empty_output(output_dir: Path) -> tuple[Path, Path, Path, Path]:
 
 def run_openpose(
     input_path: Path,
-    openpose_root: Path,
+    runtime: OpenPoseRuntime,
     json_dir: Path,
     rendered_video: Path,
     net_resolution: str,
 ) -> tuple[list[str], float]:
-    executable = openpose_root / "bin" / "OpenPoseDemo.exe"
-    model_dir = openpose_root / "models"
-    body_model = model_dir / "pose" / "body_25" / "pose_iter_584000.caffemodel"
-
-    if not executable.is_file():
-        raise FileNotFoundError(f"OpenPose executable not found: {executable}")
-    if not body_model.is_file():
-        raise FileNotFoundError(f"BODY_25 model not found: {body_model}")
-
     command = [
-        str(executable),
+        str(runtime.executable),
         "--video",
         str(input_path),
         "--model_folder",
-        str(model_dir),
+        str(runtime.model_dir),
         "--model_pose",
         "BODY_25",
         "--number_people_max",
@@ -185,7 +178,7 @@ def run_openpose(
     started = time.perf_counter()
     completed = subprocess.run(
         command,
-        cwd=openpose_root,
+        cwd=runtime.working_dir,
         check=False,
         text=True,
     )
@@ -303,8 +296,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--openpose-root",
         type=Path,
-        default=root / "openpose" / "openpose-portable" / "openpose",
-        help="Portable OpenPose root containing bin/ and models/",
+        help="OpenPose source/build or portable root (default: auto-detect)",
     )
     parser.add_argument(
         "--net-resolution",
@@ -318,7 +310,6 @@ def main() -> int:
     args = parse_args()
     root = project_root()
     input_path = args.input.expanduser().resolve()
-    openpose_root = args.openpose_root.expanduser().resolve()
     output_dir = (
         args.output_dir.expanduser().resolve()
         if args.output_dir
@@ -327,6 +318,7 @@ def main() -> int:
 
     if not input_path.is_file():
         raise FileNotFoundError(f"Input video not found: {input_path}")
+    runtime = find_openpose(root, args.openpose_root)
 
     source_metadata = video_metadata(input_path)
     json_dir, rendered_avi, rendered_video, npz_path = ensure_empty_output(output_dir)
@@ -339,7 +331,7 @@ def main() -> int:
     try:
         command, processing_seconds = run_openpose(
             input_path=processing_input,
-            openpose_root=openpose_root,
+            runtime=runtime,
             json_dir=json_dir,
             rendered_video=rendered_avi,
             net_resolution=args.net_resolution,

@@ -9,6 +9,7 @@ tmp/
 # Downloaded OpenPose Windows binaries and generated build files
 openpose/openpose-portable/
 openpose/build/
+openpose/models/*.pt
 
 # Python environments and caches
 **/.venv/

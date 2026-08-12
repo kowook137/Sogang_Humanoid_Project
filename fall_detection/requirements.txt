@@ -1,2 +1,5 @@
 numpy>=2.0,<3
 opencv-python>=4.8,<6
+ultralytics>=8.4,<9
+# Install the CUDA build separately; see README.md. Keeping torch out of this
+# file avoids pip silently replacing the selected CUDA build.

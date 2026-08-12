@@ -16,6 +16,7 @@ import numpy as np
 from detector import FallState, detect_fall
 from features import extract_features
 from process_video import select_person
+from openpose_runtime import find_openpose
 
 
 STATE_COLORS = {
@@ -85,27 +86,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--openpose-root",
         type=Path,
-        default=project_root() / "openpose" / "openpose-portable" / "openpose",
+        help="OpenPose source/build or portable root (default: auto-detect)",
     )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    openpose_root = args.openpose_root.resolve()
-    executable = openpose_root / "bin" / "OpenPoseDemo.exe"
-    if not executable.is_file():
-        raise FileNotFoundError(f"OpenPose executable not found: {executable}")
+    runtime = find_openpose(project_root(), args.openpose_root)
 
     session = datetime.now().strftime("%Y%m%d_%H%M%S")
     json_dir = project_root() / "tmp" / "live_detection" / session
     json_dir.mkdir(parents=True, exist_ok=False)
     width, height = args.camera_resolution
     command = [
-        str(executable),
+        str(runtime.executable),
         "--camera", str(args.camera),
         "--camera_resolution", f"{width}x{height}",
-        "--model_folder", str(openpose_root / "models"),
+        "--model_folder", str(runtime.model_dir),
         "--model_pose", "BODY_25",
         "--number_people_max", "1",
         "--net_resolution", args.net_resolution,
@@ -113,7 +111,7 @@ def main() -> int:
         "--display", "1",
     ]
 
-    process = subprocess.Popen(command, cwd=openpose_root)
+    process = subprocess.Popen(command, cwd=runtime.working_dir)
     keypoints: list[np.ndarray] = []
     timestamps: deque[float] = deque(maxlen=60)
     consumed: set[Path] = set()

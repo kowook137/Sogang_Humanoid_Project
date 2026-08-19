@@ -1,0 +1,6 @@
+[submodule "Berkeley-Humanoid-Lite/source/berkeley_humanoid_lite_assets"]
+	path = Berkeley-Humanoid-Lite/source/berkeley_humanoid_lite_assets
+	url = https://github.com/HybridRobotics/Berkeley-Humanoid-Lite-Assets.git
+[submodule "Berkeley-Humanoid-Lite/source/berkeley_humanoid_lite_lowlevel"]
+	path = Berkeley-Humanoid-Lite/source/berkeley_humanoid_lite_lowlevel
+	url = https://github.com/HybridRobotics/Berkeley-Humanoid-Lite-Lowlevel.git

@@ -1,6 +1,8 @@
 
 import time
 import threading
+import tempfile
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -8,7 +10,7 @@ import mujoco
 import mujoco.viewer
 
 from berkeley_humanoid_lite_lowlevel.policy.config import Cfg
-from berkeley_humanoid_lite_lowlevel.policy.gamepad import Se2Gamepad
+from .keyboard import KeyboardCommandController
 
 
 def quat_rotate_inverse(q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
@@ -34,14 +36,64 @@ class MujocoEnv:
         self.cfg = cfg
 
         # Load appropriate MJCF model based on robot configuration
+        project_root = Path(__file__).resolve().parents[4]
+        asset_root = (
+            project_root
+            / "source/berkeley_humanoid_lite_assets/data/robots"
+            / "berkeley_humanoid/berkeley_humanoid_lite"
+        )
+        mjcf_dir = asset_root / "mjcf"
+        mesh_dir = asset_root / "meshes"
+
         if cfg.num_joints == 22:
-            self.mj_model = mujoco.MjModel.from_xml_path("source/berkeley_humanoid_lite_assets/data/mjcf/bhl_scene.xml")
+            scene_name = "bhl_scene.xml"
+            robot_name = "berkeley_humanoid_lite.xml"
         else:
-            self.mj_model = mujoco.MjModel.from_xml_path("source/berkeley_humanoid_lite_assets/data/mjcf/bhl_biped_scene.xml")
+            scene_name = "bhl_biped_scene.xml"
+            robot_name = "berkeley_humanoid_lite_biped.xml"
+
+        scene_path = mjcf_dir / scene_name
+        robot_path = mjcf_dir / robot_name
+
+        for required_path in (scene_path, robot_path, mesh_dir):
+            if not required_path.exists():
+                raise FileNotFoundError(
+                    f"Required MuJoCo asset not found: {required_path}"
+                )
+
+        # The released MJCF refers to assets/merged, while the repository stores
+        # the meshes in a sibling meshes directory. Build corrected temporary
+        # XML files without modifying the assets submodule.
+        robot_xml = robot_path.read_text()
+        robot_xml = robot_xml.replace(
+            'meshdir="assets"',
+            f'meshdir="{mesh_dir.as_posix()}"',
+        )
+        robot_xml = robot_xml.replace('file="merged/', 'file="')
+
+        with tempfile.TemporaryDirectory(prefix="bhl_mjcf_") as temp_dir:
+            temp_path = Path(temp_dir)
+            temporary_scene = temp_path / scene_name
+            temporary_robot = temp_path / robot_name
+
+            temporary_scene.write_text(scene_path.read_text())
+            temporary_robot.write_text(robot_xml)
+
+            self.mj_model = mujoco.MjModel.from_xml_path(
+                str(temporary_scene)
+            )
 
         self.mj_data = mujoco.MjData(self.mj_model)
         self.mj_model.opt.timestep = self.cfg.physics_dt
-        self.mj_viewer = mujoco.viewer.launch_passive(self.mj_model, self.mj_data)
+        self.mj_viewer = mujoco.viewer.launch_passive(
+            self.mj_model,
+            self.mj_data,
+            key_callback=self._on_key,
+        )
+
+    def _on_key(self, keycode: int) -> None:
+        """Default keyboard callback for viewer-only environments."""
+        pass
 
 
 class MujocoVisualizer(MujocoEnv):
@@ -107,6 +159,7 @@ class MujocoSimulator(MujocoEnv):
         cfg (Cfg): Configuration object containing simulation parameters
     """
     def __init__(self, cfg: Cfg):
+        self.command_controller = KeyboardCommandController()
         super().__init__(cfg)
         self.physics_substeps = int(np.round(self.cfg.policy_dt / self.cfg.physics_dt))
 
@@ -136,9 +189,9 @@ class MujocoSimulator(MujocoEnv):
         self.command_velocity_y = 0.0
         self.command_velocity_yaw = 0.0
 
-        # Start joystick thread
-        self.command_controller = Se2Gamepad()
-        self.command_controller.run()
+    def _on_key(self, keycode: int) -> None:
+        """Forward MuJoCo viewer key events to the keyboard controller."""
+        self.command_controller.handle_key(keycode)
 
     def reset(self) -> torch.Tensor:
         """Reset the simulation environment to initial state.
@@ -260,15 +313,12 @@ class MujocoSimulator(MujocoEnv):
             torch.Tensor: Concatenated observation vector containing base orientation,
                          angular velocity, joint positions, velocities, and command state
         """
-        command_mode_switch = self.command_controller.commands["mode_switch"]
-        command_velocity_x = self.command_controller.commands["velocity_x"]
-        command_velocity_y = self.command_controller.commands["velocity_y"]
-        command_velocity_yaw = self.command_controller.commands["velocity_yaw"]
+        command_velocity_x, command_velocity_y, command_velocity_yaw = (
+            self.command_controller.get_velocity()
+        )
 
-        if command_mode_switch != 0:
-            self.mode = command_mode_switch
         self.command_velocity_x = command_velocity_x
-        self.command_velocity_y = command_velocity_y * 0.5
+        self.command_velocity_y = command_velocity_y
         self.command_velocity_yaw = command_velocity_yaw
 
         return torch.cat([

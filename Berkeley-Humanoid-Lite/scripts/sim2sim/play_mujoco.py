@@ -30,7 +30,7 @@ def main():
     default_actions = np.array(cfg.default_joint_positions, dtype=np.float32)[robot.cfg.action_indices]
 
     # Main control loop
-    while True:
+    while robot.mj_viewer.is_running():
         # Send observations and receive actions
         actions = controller.update(obs.numpy())
 

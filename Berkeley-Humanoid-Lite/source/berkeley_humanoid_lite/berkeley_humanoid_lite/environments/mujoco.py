@@ -189,6 +189,16 @@ class MujocoSimulator(MujocoEnv):
         self.command_velocity_y = 0.0
         self.command_velocity_yaw = 0.0
 
+        # A short command boost helps the leg-only policy leave its standing attractor.
+        # The existing policy can sustain vx=0.30 after walking starts, but it
+        # needs approximately vx=0.40 to initiate the gait from rest.
+        self._walk_start_boost_enabled = self.cfg.num_actions == 12
+        self._previous_requested_velocity_x = 0.0
+        self._walk_start_boost_steps = 0
+        self._walk_start_boost_velocity = 0.4
+        self._walk_start_minimum_velocity = 0.3
+        self._walk_start_boost_duration = 1.0
+
     def _on_key(self, keycode: int) -> None:
         """Forward MuJoCo viewer key events to the keyboard controller."""
         self.command_controller.handle_key(keycode)
@@ -317,6 +327,48 @@ class MujocoSimulator(MujocoEnv):
             self.command_controller.get_velocity()
         )
 
+        requested_velocity_x = command_velocity_x
+        minimum_velocity = self._walk_start_minimum_velocity
+        boost_velocity = self._walk_start_boost_velocity
+
+        crossed_start_threshold = (
+            self._walk_start_boost_enabled
+            and abs(requested_velocity_x) >= minimum_velocity - 1.0e-6
+            and abs(self._previous_requested_velocity_x)
+            < minimum_velocity - 1.0e-6
+            and abs(requested_velocity_x) < boost_velocity - 1.0e-6
+        )
+
+        if crossed_start_threshold:
+            self._walk_start_boost_steps = max(
+                1,
+                int(
+                    round(
+                        self._walk_start_boost_duration
+                        / self.cfg.policy_dt
+                    )
+                ),
+            )
+            print(
+                f"Walk-start boost: requested vx="
+                f"{requested_velocity_x:+.2f}, "
+                f"policy vx="
+                f"{np.sign(requested_velocity_x) * boost_velocity:+.2f}"
+            )
+
+        if (
+            self._walk_start_boost_steps > 0
+            and abs(requested_velocity_x)
+            >= minimum_velocity - 1.0e-6
+        ):
+            command_velocity_x = (
+                np.sign(requested_velocity_x) * boost_velocity
+            )
+            self._walk_start_boost_steps -= 1
+        else:
+            self._walk_start_boost_steps = 0
+
+        self._previous_requested_velocity_x = requested_velocity_x
         self.command_velocity_x = command_velocity_x
         self.command_velocity_y = command_velocity_y
         self.command_velocity_yaw = command_velocity_yaw

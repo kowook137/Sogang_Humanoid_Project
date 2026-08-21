@@ -15,8 +15,32 @@ from detector import FallState, detect_fall  # noqa: E402
 from features import extract_features  # noqa: E402
 from openpose_runtime import find_openpose  # noqa: E402
 from process_video import select_person  # noqa: E402
+from evaluate import finite_max  # noqa: E402
+from streaming import StreamingFallDetector  # noqa: E402
 from train_gmdcsa24 import resample  # noqa: E402
 from yolo_pose import coco_to_body25, resolve_device  # noqa: E402
+
+
+def falling_frame(index: int, fall_start: int, fall_frames: int) -> np.ndarray:
+    """One BODY_25 frame of a person standing, then toppling to the floor."""
+    progress = min(max((index - fall_start) / fall_frames, 0.0), 1.0)
+    frame = np.full((25, 3), np.nan, dtype=np.float32)
+    frame[:, 2] = 0.0
+    hip = np.asarray([320, 260 + 130 * progress])
+    shoulder = np.asarray([320 + 100 * progress, 150 + 210 * progress])
+    nose = np.asarray([320 + 130 * progress, 80 + 290 * progress])
+    points = {
+        0: nose, 1: shoulder, 2: shoulder + (-20, 0), 5: shoulder + (20, 0),
+        8: hip, 9: hip + (-20, 0), 12: hip + (20, 0),
+        10: hip + (-20, 70 * (1 - progress) + 10),
+        13: hip + (20, 70 * (1 - progress) + 10),
+        11: hip + (-20, 140 * (1 - progress) + 15),
+        14: hip + (20, 140 * (1 - progress) + 15),
+    }
+    for joint, xy in points.items():
+        frame[joint, :2] = xy
+        frame[joint, 2] = 1.0
+    return frame
 
 
 class OpenPoseRuntimeTests(unittest.TestCase):
@@ -112,6 +136,80 @@ class KeypointTests(unittest.TestCase):
 
         self.assertTrue(result.fall_detected)
         self.assertEqual(FallState(int(result.states[-1])), FallState.FALLEN)
+
+
+class EvaluationTests(unittest.TestCase):
+    def test_finite_max_survives_a_video_with_no_detections(self) -> None:
+        self.assertEqual(finite_max(np.full(5, np.nan, dtype=np.float32)), 0.0)
+
+    def test_finite_max_ignores_nan(self) -> None:
+        self.assertAlmostEqual(finite_max(np.asarray([np.nan, 0.3, 1.7])), 1.7)
+
+
+class StreamingDetectorTests(unittest.TestCase):
+    def test_synthetic_fall_reaches_fallen_state(self) -> None:
+        detector = StreamingFallDetector(fps=10.0, frame_height=480)
+        for index in range(60):
+            detector.update(falling_frame(index, fall_start=20, fall_frames=10))
+
+        self.assertEqual(detector.state, FallState.FALLEN)
+        self.assertTrue(detector.fall_latched)
+
+    def test_alarm_survives_the_fall_leaving_the_feature_window(self) -> None:
+        """A motionless person on the floor must stay reported as FALLEN.
+
+        Re-running the offline detector over a sliding window used to clear the
+        alarm as soon as the falling motion scrolled out of the buffer.
+        """
+        detector = StreamingFallDetector(fps=15.0, frame_height=480)
+        for index in range(600):  # 40 s: fall at 5 s, motionless afterwards
+            detector.update(falling_frame(index, fall_start=75, fall_frames=15))
+
+        self.assertEqual(detector.state, FallState.FALLEN)
+        self.assertLess(detector.first_fallen_frame, 150)
+
+    def test_baseline_is_frozen_after_calibration(self) -> None:
+        """The standing reference must not drift onto the collapsed pose."""
+        detector = StreamingFallDetector(fps=15.0, frame_height=480)
+        for index in range(40):
+            detector.update(falling_frame(index, fall_start=1000, fall_frames=15))
+        calibrated_height = detector.baseline_body_height
+        calibrated_hip = detector.baseline_hip_y
+        for index in range(40, 600):
+            detector.update(falling_frame(index, fall_start=75, fall_frames=15))
+
+        self.assertEqual(detector.baseline_body_height, calibrated_height)
+        self.assertEqual(detector.baseline_hip_y, calibrated_hip)
+
+    def test_reset_alarm_clears_the_latch(self) -> None:
+        detector = StreamingFallDetector(fps=10.0, frame_height=480)
+        for index in range(60):
+            detector.update(falling_frame(index, fall_start=20, fall_frames=10))
+        detector.reset_alarm()
+
+        self.assertFalse(detector.fall_latched)
+        self.assertEqual(detector.state, FallState.NORMAL)
+
+    def test_no_fall_is_reported_before_calibration_completes(self) -> None:
+        detector = StreamingFallDetector(fps=10.0, frame_height=480)
+        update = detector.update(falling_frame(0, fall_start=20, fall_frames=10))
+
+        self.assertTrue(update.calibrating)
+        self.assertFalse(update.fall_latched)
+
+    def test_history_stays_bounded_over_a_long_session(self) -> None:
+        detector = StreamingFallDetector(fps=30.0, frame_height=480)
+        standing = falling_frame(0, fall_start=10_000, fall_frames=15)
+        for _ in range(5_000):
+            detector.update(standing)
+
+        # Only the drop window is ever read back, so memory must not track runtime.
+        self.assertLessEqual(detector._hip.smooth._data.size, 64)
+
+    def test_rejects_a_batch_instead_of_a_single_frame(self) -> None:
+        detector = StreamingFallDetector(fps=10.0, frame_height=480)
+        with self.assertRaisesRegex(ValueError, r"\(25, 3\)"):
+            detector.update(np.zeros((5, 25, 3), dtype=np.float32))
 
 
 if __name__ == "__main__":

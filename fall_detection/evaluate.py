@@ -27,6 +27,16 @@ def project_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def finite_max(values: np.ndarray) -> float:
+    """Largest finite value, or 0.0 for a video where nobody was ever detected.
+
+    np.nanmax warns and returns NaN on an all-NaN input, which then lands in the
+    summary CSV as an unusable value.
+    """
+    finite = values[np.isfinite(values)]
+    return float(finite.max()) if finite.size else 0.0
+
+
 def load_features(output_dir: Path) -> PoseFeatures:
     with np.load(output_dir / "keypoints.npz") as data:
         return extract_features(
@@ -113,14 +123,12 @@ def evaluate(outputs_root: Path, dataset_dir: Path, write_videos: bool) -> list[
                 if result.first_fallen_frame is not None
                 else None
             ),
-            "max_score": round(float(np.nanmax(result.fall_score)), 4),
+            "max_score": round(finite_max(result.fall_score), 4),
             "max_downward_speed": round(
-                float(np.nanmax(np.fmax(features.hip_speed, features.head_speed))), 4
-                if np.any(np.isfinite(features.hip_speed) | np.isfinite(features.head_speed))
-                else 0.0,
+                finite_max(np.fmax(features.hip_speed, features.head_speed)), 4
             ),
-            "max_torso_angle": round(float(np.nanmax(features.torso_angle)), 3),
-            "max_bbox_aspect": round(float(np.nanmax(features.bbox_aspect)), 3),
+            "max_torso_angle": round(finite_max(features.torso_angle), 3),
+            "max_bbox_aspect": round(finite_max(features.bbox_aspect), 3),
         }
         rows.append(row)
         if write_videos:

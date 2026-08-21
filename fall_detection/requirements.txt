@@ -3,3 +3,8 @@ opencv-python>=4.8,<6
 ultralytics>=8.4,<9
 # Install the CUDA build separately; see README.md. Keeping torch out of this
 # file avoids pip silently replacing the selected CUDA build.
+#
+# DO NOT install this file on a Jetson. JetPack already ships NumPy, OpenCV and
+# the only aarch64 PyTorch with CUDA, and pip would replace them with wheels
+# that have no GPU support. On JetPack install just:
+#   python3.10 -m pip install --user --no-deps ultralytics ultralytics-thop py-cpuinfo

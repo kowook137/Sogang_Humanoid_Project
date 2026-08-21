@@ -1,6 +1,6 @@
 # 현서 담당 낙상 감지 개발 이력 및 계획
 
-최종 갱신일: 2026-08-21
+최종 갱신일: 2026-08-22
 
 ## 1. 프로젝트 목표
 
@@ -929,3 +929,174 @@ YOLO11n-pose 헤드리스 비렌더링 영상 추론을 확인했다. CPU 3프�
 
 첫 벤치마크 목표는 입력 포함 10 FPS 이상과 p95 약 100 ms지만, 이는 실제 측정 전의
 출발점일 뿐 합격을 주장하는 수치가 아니다.
+
+## 21. Jetson Orin Nano 실측 및 실시간 경로 재구현
+
+작업일: 2026-08-22
+
+실제 Jetson Orin Nano Super 8GB(L4T R36.4.7, JetPack 6.2 계열)에서 코드를 직접 실행하며
+배포 준비 상태를 확인했다. 20절까지의 준비는 PC에서 작성한 것이고, 이번에는 본체에서
+측정한 값으로 대체한다.
+
+### 확인된 환경
+
+```text
+보드      Jetson Orin Nano Engineering Reference Developer Kit Super (8GB)
+L4T       R36.4.7, Ubuntu 22.04, 전력 모드 MAXN_SUPER, 6코어, NVMe 467GB
+PyTorch   2.5.0a0+nv24.08 / CUDA 12.6 / cuda_available=True / Orin sm_87
+OpenCV    4.11.0   NumPy 1.26.4   ROS 2 Humble + rclpy 정상
+미설치    Ultralytics(설치 완료), TensorRT, 카메라
+```
+
+### 발견한 실행 차단 요인
+
+`PATH` 앞쪽의 `~/jetconda3/bin/python3`가 **Python 3.6.1**이라, `python3 fall_detection/...`
+형태의 명령이 전부 문법 오류로 죽는다. CUDA PyTorch를 가진 인터프리터는 JetPack의
+`/usr/bin/python3.10` 하나뿐이다. `run_jetson.sh`가 PATH를 신뢰하지 않고 `torch.cuda`,
+OpenCV, Ultralytics가 모두 import되는 인터프리터를 직접 찾도록 고쳤다.
+
+또한 `requirements.txt`를 Jetson에서 그대로 설치하면 pip가 JetPack PyTorch를 CUDA 없는
+일반 aarch64 wheel로 교체한다. Ultralytics만 `--no-deps`로 설치하는 절차로 문서를 바꿨다.
+
+### 규칙 계층이 실제 병목이었음
+
+Orin Nano에서 프레임당 비용을 측정했다.
+
+```text
+윈도우   extract_features   detect_fall   합계
+   60         32.6 ms         1.2 ms     33.8 ms
+  120         62.6 ms         2.3 ms     64.8 ms
+  225        115.6 ms         4.2 ms    119.8 ms
+  450        230.0 ms         8.4 ms    238.3 ms
+```
+
+GPU 포즈 추론은 35 ms인데 규칙 계층이 매 프레임 전체 윈도우를 다시 계산하느라 그보다 큰
+비용을 쓰고 있었다. 30 FPS 카메라 기본값인 450프레임 윈도우에서는 프레임당 238 ms로,
+TensorRT를 붙여도 약 4 FPS가 천장이었다.
+
+### `streaming.py` 추가
+
+같은 특징, 같은 `DetectorConfig` 임곗값, 같은 상태 전이를 프레임당 O(1)로 갱신하는
+`StreamingFallDetector`를 추가했다. 저장하는 이력은 하강량 계산에 실제로 필요한 약 1초뿐이다.
+
+```text
+윈도우   기존         스트리밍     배수
+   60    37.1 ms      0.924 ms     40x
+  120    65.9 ms      0.907 ms     73x
+  225   121.9 ms      0.901 ms    135x
+  450   242.2 ms      0.911 ms    266x
+```
+
+30분(27,000프레임) 연속 처리에서 프레임당 0.917 → 0.903 ms로 평탄했고 RSS는 28 MB로
+변하지 않았다. 저장소 샘플 영상 end-to-end는 10.3 FPS에서 18.6 FPS로 올랐다.
+
+특징 수식이 두 벌로 갈라지지 않도록 `features.py`에서 프레임 단위 계산을 `frame_*`
+함수로 분리하고 오프라인 경로도 같은 함수를 쓰게 했다. 무작위 12회 시험에서 리팩터 전후
+출력이 모든 필드에서 완전히 동일함을 확인했다.
+
+### 실시간 판정의 두 가지 오류 수정
+
+첫째, 기준 신체 높이와 골반 위치가 슬라이딩 윈도우에서 다시 측정되고 있었다. 낙상 몇 초
+뒤에는 쓰러진 자세가 "서 있는" 기준이 되어 버린다. 이제 세션 시작의 보정 구간에서 한 번만
+정하고 고정한다.
+
+둘째, 더 심각한 문제로 **경보가 스스로 해제됐다.** 15 FPS·40초 시나리오(5초에 낙상 후
+계속 정지)를 재현한 결과는 다음과 같다.
+
+```text
+기존   6.2초 FALLEN  ->  19.8초에 NORMAL로 복귀 (사람은 계속 바닥에 있음)
+수정   6.3초 FALLEN  ->  40초까지 FALLEN 유지 (latched)
+```
+
+낙상 장면이 15초 윈도우 밖으로 밀려나면 근거가 사라져 상태가 되돌아가고 있었다. 이제
+`FALLEN`은 세션 동안 유지되며 `reset_alarm()`으로만 해제한다. 사람이 스스로 일어난 경우를
+위해 `--auto-clear-seconds`를 두었고 기본값은 해제하지 않음이다. 이 시나리오를 회귀
+테스트로 추가했다.
+
+### 해상도는 성능과 무관함
+
+순수 추론시간을 40회씩 측정한 결과 imgsz 256/320/416/640이 모두 30~32 ms였다. 이 모델은
+연산량이 아니라 커널 실행 오버헤드에 묶여 있다. 따라서 20절에서 정한 416 입력은 이득이
+없어 기본값을 640으로 되돌렸고, 속도를 올리는 유일한 수단은 TensorRT 엔진임을 확인했다.
+
+### 그 외 수정
+
+- `evaluate.py`의 `round()` 인자 결합 오류를 고쳤다. 삼항 연산자가 값이 아니라 `ndigits`에
+  붙어 있어서, 사람이 한 번도 검출되지 않은 영상이 있으면 배치 평가 전체가 `TypeError`로
+  죽었다.
+- `live_detect.py`가 부분 기록된 JSON을 건너뛰고 뒤 프레임을 먼저 소비해 시간축이 섞이던
+  문제를 고쳤다. 이제 미완성 파일을 만나면 멈춘다. 무한히 커지던 소비 목록도 제거했다.
+- `jetson_preflight.py`를 blocker와 warning으로 나누고, 인터프리터 불일치, TensorRT 부재,
+  가용 메모리 부족, rclpy 미로딩을 함께 보고하도록 다시 썼다.
+- 단위 테스트 10개 → 19개.
+
+### 메모리 제약
+
+Orin Nano는 CPU와 GPU가 8GB를 공유한다. 데스크톱 세션이 떠 있으면 가용 메모리가 2.7GB로
+떨어지고, 그 상태에서 CUDA 초기화가 `CUBLAS_STATUS_ALLOC_FAILED`로 실패했다. 실제 운용은
+헤드리스로 해야 한다. 보행 정책과 EXAONE LLM을 동시에 올리는 구성은 이 8GB 안에서
+별도 측정이 필요하다.
+
+### 학습·구동 역할 분담 확정
+
+Jetson에서 학습까지 하려는 시도는 하지 않기로 했다. 근거는 다음과 같다.
+
+- Orin Nano는 CPU와 GPU가 8GB를 공유하고, 데스크톱 세션만 떠 있어도 가용 메모리가 2.7GB로
+  떨어진다. GRU 학습 배치를 올릴 여유가 없다.
+- 공개 데이터셋 원본이 약 1.1GB이고 포즈 추출까지 하면 더 커진다. Jetson에 둘 이유가 없다.
+- 학습은 재현성이 중요한데, PC의 CUDA 12.4 조합에서 이미 검증한 절차가 있다.
+
+따라서 역할을 다음과 같이 고정한다.
+
+```text
+PC (NVIDIA GPU)          데이터 준비, 포즈 추출, GRU 학습, 정확도 검증
+Jetson Orin Nano         카메라 실시간 판정만
+공유                     features.py, detector.py, streaming.py의 수식과 임곗값
+```
+
+이 분담을 `fall_detection/README.md` 최상단의 역할 표와 파일별 실행 위치 표로 옮겼다.
+문서도 `## PC: 데이터 준비, 학습, 검증`과 `## Jetson: 실시간 구동`으로 나눴다. 이전에는
+Windows → Linux → WSL → Jetson 순의 작업 이력 순서로 쓰여 있어서, 새로 합류한 사람이
+자기 장비에서 무엇을 해야 하는지 찾기 어려웠다.
+
+### Jetson 런타임 설치 정리
+
+설치 절차를 `fall_detection/setup_jetson.sh` 하나로 묶었다. 여러 번 실행해도 안전하다.
+
+```bash
+fall_detection/setup_jetson.sh          # 사용자 권한 설치만
+fall_detection/setup_jetson.sh --apt    # sudo apt 단계까지
+```
+
+이 보드에서 실제로 설치한 내용은 다음과 같다.
+
+```text
+ultralytics 8.4.126, ultralytics-thop, py-cpuinfo   --no-deps 설치
+onnx 1.22.0, onnxslim 0.1.96                        numpy==1.26.4 제약 설치
+yolo11n-pose.pt                                     내려받음
+```
+
+`--no-deps`와 NumPy 제약이 핵심이다. 제약 없이 `onnx`를 설치하면 pip가 NumPy 2.2.6을
+끌어와 JetPack NumPy 1.26.4를 가리고, JetPack OpenCV가 그 ABI로 빌드되어 있어 함께
+깨진다. 실제로 dry-run에서 이 동작을 확인하고 제약을 걸었다. 설치 후 NumPy 1.26.4,
+OpenCV 4.11.0, `torch.cuda.is_available()=True`, cv2↔numpy 변환을 모두 재확인했다.
+
+`tensorrt`와 `ffmpeg`는 root 권한이 필요해 설치하지 못했다. 스크립트가 명령만 출력한다.
+
+### 아직 못 하는 것
+
+1. **카메라 없음.** `/dev/video*`가 없고 USB에도 카메라가 없다. 실시간 종단 검증, 카메라
+   포함 FPS, 시간당 오경보, 거리별 오탐·미탐을 측정할 수 없다. 위 18.6 FPS는 녹화 영상
+   기준이다.
+2. **TensorRT 미설치.** root 권한이 필요하다(`sudo apt install -y tensorrt ffmpeg`, 또는
+   `setup_jetson.sh --apt`). 엔진 빌드에 필요한 `onnx`/`onnxslim`은 설치해 두었으므로
+   TensorRT만 깔면 바로 엔진을 만들 수 있다. 엔진 없이도 실행되지만 현재 수치는 PyTorch
+   eager 기준이며, 해상도가 성능에 영향이 없는 이상 이것이 유일한 속도 개선 수단이다.
+3. **Depth Camera 미확정.** USB에 depth 카메라가 없어 depth 기반 특징은 착수할 수 없다.
+4. **공개 데이터셋 부재.** `data/`는 Git에서 제외되어 이 보드에 없다. GMDCSA-24 재평가나
+   재학습을 하려면 약 1.1GB를 다시 내려받아야 한다.
+5. **Jetson OpenPose는 포기 권장.** OpenPose 1.7.0은 오래된 Caffe 기반이라 CUDA 12.6과
+   JetPack 6에서 빌드가 사실상 불가능하다. Jetson 경로는 YOLO pose로 확정하고, OpenPose는
+   Windows 녹화 데이터 처리 용도로만 남긴다.
+6. **ROS 2 연동 미착수.** rclpy는 정상 동작하므로 차단 요인은 없다. 다만 보행 노드의
+   토픽 이름과 메시지 형식이 정해져야 publisher를 확정할 수 있다.

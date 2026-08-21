@@ -19,8 +19,8 @@ import numpy as np
 import torch
 from ultralytics import YOLO
 
-from detector import FallState, detect_fall
-from features import extract_features
+from detector import FallState
+from streaming import StreamingFallDetector
 
 
 COCO_TO_BODY25 = {
@@ -44,8 +44,23 @@ COCO_TO_BODY25 = {
 }
 
 
+# Frames used to measure the real processing rate before the feature windows
+# are sized. A camera's advertised FPS is rarely what the pipeline achieves.
+FPS_PROBE_FRAMES = 15
+
+
 def project_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+def measured_fps(timestamps: deque[float], fallback: float) -> float:
+    if len(timestamps) < 5:
+        return fallback
+    intervals = np.diff(np.asarray(timestamps, dtype=np.float64))
+    intervals = intervals[(intervals > 0.001) & (intervals < 2.0)]
+    if not intervals.size:
+        return fallback
+    return float(np.clip(1.0 / np.median(intervals), 1.0, 60.0))
 
 
 def parse_source(value: str) -> int | str:
@@ -146,6 +161,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip skeleton drawing (recommended for headless Jetson deployment)",
     )
+    parser.add_argument(
+        "--auto-clear-seconds",
+        type=float,
+        default=0.0,
+        help="Clear a FALLEN latch after the person is upright this long; 0 keeps it latched",
+    )
+    parser.add_argument(
+        "--status-interval",
+        type=float,
+        default=0.0,
+        help="Print a status line every N seconds (headless soak testing); 0 disables",
+    )
     return parser.parse_args()
 
 
@@ -198,13 +225,27 @@ def main() -> int:
             raise RuntimeError(f"Cannot create output video: {args.output}")
 
     model = YOLO(str(args.model))
-    poses: deque[np.ndarray] = deque(maxlen=max(60, round(fallback_fps * 15)))
     timestamps: deque[float] = deque(maxlen=60)
+    # A video file reports its own rate; a camera has to be measured, so the
+    # first frames are buffered and replayed once the real rate is known.
+    detector: StreamingFallDetector | None = None
+    if isinstance(source, str):
+        detector = StreamingFallDetector(
+            fps=fallback_fps,
+            frame_height=height,
+            auto_clear_seconds=args.auto_clear_seconds,
+        )
+    pending: list[np.ndarray] = []
     state = FallState.UNKNOWN
+    latched = False
+    calibrating = True
+    fps = fallback_fps
     processed = 0
     inference_times: list[float] = []
     started = time.perf_counter()
     next_frame_at = started
+    next_status_at = started
+    previous_state = state
     try:
         while True:
             if ffmpeg_process:
@@ -224,9 +265,14 @@ def main() -> int:
             if not ok:
                 if capture is not None and args.loop and isinstance(source, str):
                     capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    poses.clear()
                     timestamps.clear()
+                    detector = StreamingFallDetector(
+                        fps=fallback_fps,
+                        frame_height=height,
+                        auto_clear_seconds=args.auto_clear_seconds,
+                    )
                     state = FallState.UNKNOWN
+                    latched = False
                     next_frame_at = time.perf_counter()
                     continue
                 break
@@ -245,23 +291,48 @@ def main() -> int:
             )[0]
             inference_times.append(time.perf_counter() - inference_started)
             pose = select_pose(prediction)
-            poses.append(pose)
             timestamps.append(time.perf_counter())
-            fps = fallback_fps
-            if isinstance(source, int) and len(timestamps) >= 5:
-                fps = float(np.clip(1.0 / np.median(np.diff(timestamps)), 1.0, 60.0))
-            if len(poses) >= max(5, round(fps * 2)):
-                features = extract_features(np.stack(poses), fps, width, height)
-                state = FallState(int(detect_fall(features).states[-1]))
+            if detector is None:
+                pending.append(pose)
+                if len(pending) >= FPS_PROBE_FRAMES:
+                    fps = measured_fps(timestamps, fallback_fps)
+                    detector = StreamingFallDetector(
+                        fps=fps,
+                        frame_height=height,
+                        auto_clear_seconds=args.auto_clear_seconds,
+                    )
+                    for buffered in pending:
+                        update = detector.update(buffered)
+                    pending.clear()
+                    state, latched = update.state, update.fall_latched
+                    calibrating = update.calibrating
+            else:
+                update = detector.update(pose)
+                state, latched = update.state, update.fall_latched
+                calibrating = update.calibrating
+                fps = detector.fps
+
+            if args.status_interval > 0 or state != previous_state:
+                now = time.perf_counter()
+                if state != previous_state or now >= next_status_at:
+                    print(
+                        f"t={now - started:7.1f}s frame={processed:6d} state={state.name:<14}"
+                        f" latched={latched} fps={fps:5.1f}",
+                        flush=True,
+                    )
+                    previous_state = state
+                    if args.status_interval > 0:
+                        next_status_at = now + args.status_interval
 
             should_render = not args.no_render and (writer is not None or not args.headless)
             if should_render:
                 annotated = prediction.plot()
-                color = (0, 0, 255) if state == FallState.FALLEN else (0, 220, 0)
-                cv2.rectangle(annotated, (10, 10), (390, 64), (0, 0, 0), -1)
+                color = (0, 0, 255) if latched else (0, 220, 0)
+                label = "CALIBRATING" if calibrating else state.name
+                cv2.rectangle(annotated, (10, 10), (430, 64), (0, 0, 0), -1)
                 cv2.putText(
                     annotated,
-                    f"STATE: {state.name}  FPS: {fps:.1f}",
+                    f"{label}{'  [FALL]' if latched else ''}  FPS: {fps:.1f}",
                     (20, 47),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.8,
@@ -304,7 +375,9 @@ def main() -> int:
         f"cuda={torch.version.cuda} frames={processed} elapsed={elapsed:.2f}s "
         f"average_fps={processed / elapsed:.2f} warmup_ms={warmup_ms:.2f} "
         f"inference_median_ms={median_ms:.2f} "
-        f"inference_p95_ms={p95_ms:.2f} final_state={state.name}"
+        f"inference_p95_ms={p95_ms:.2f} final_state={state.name} "
+        f"fall_latched={latched} "
+        f"first_fallen_frame={detector.first_fallen_frame if detector else None}"
     )
     if args.output:
         print(f"output={args.output.resolve()}")

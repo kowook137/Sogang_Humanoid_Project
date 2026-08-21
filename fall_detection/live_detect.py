@@ -13,9 +13,9 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from detector import FallState, detect_fall
-from features import extract_features
+from detector import FallState
 from process_video import select_person
+from streaming import StreamingFallDetector
 from openpose_runtime import find_openpose
 
 
@@ -26,6 +26,9 @@ STATE_COLORS = {
     FallState.FALLEN: (0, 0, 255),
     FallState.UNKNOWN: (160, 160, 160),
 }
+
+
+FPS_PROBE_FRAMES = 15
 
 
 def project_root() -> Path:
@@ -112,37 +115,58 @@ def main() -> int:
     ]
 
     process = subprocess.Popen(command, cwd=runtime.working_dir)
-    keypoints: list[np.ndarray] = []
     timestamps: deque[float] = deque(maxlen=60)
-    consumed: set[Path] = set()
+    # OpenPose names JSON files with a zero-padded frame counter, so the last
+    # consumed name is enough to resume; keeping a set of every path seen would
+    # grow without bound over a long session.
+    last_consumed = ""
+    detector: StreamingFallDetector | None = None
+    pending: list[np.ndarray] = []
+    frame_count = 0
     current = FallState.UNKNOWN
-    started = time.monotonic()
+    detected = False
+    latched = False
     cv2.namedWindow("Fall Detection Status", cv2.WINDOW_NORMAL)
 
     try:
         while process.poll() is None:
             for path in sorted(json_dir.glob("*_keypoints.json")):
-                if path in consumed:
+                if path.name <= last_consumed:
                     continue
                 frame = read_frame(path)
                 if frame is None:
-                    continue
-                consumed.add(path)
-                keypoints.append(frame)
+                    # OpenPose is still writing this file. Stop rather than skip
+                    # ahead: consuming a later frame first would reorder the time
+                    # axis that every speed feature is differentiated along.
+                    break
+                last_consumed = path.name
+                frame_count += 1
+                detected = bool(np.any(frame[:, 2] >= 0.2))
                 timestamps.append(time.monotonic())
+                if detector is None:
+                    pending.append(frame)
+                    if len(pending) >= FPS_PROBE_FRAMES:
+                        detector = StreamingFallDetector(
+                            fps=estimated_fps(timestamps, args.fallback_fps),
+                            frame_height=height,
+                        )
+                        for buffered in pending:
+                            update = detector.update(buffered)
+                        pending.clear()
+                        current, latched = update.state, update.fall_latched
+                else:
+                    update = detector.update(frame)
+                    current, latched = update.state, update.fall_latched
 
-            fps = estimated_fps(timestamps, args.fallback_fps)
-            detected = bool(keypoints and np.any(keypoints[-1][:, 2] >= 0.2))
-            message = "Stand still for 2 seconds to calibrate"
-            if len(keypoints) >= max(5, round(fps * 2.0)):
-                features = extract_features(np.stack(keypoints), fps, width, height)
-                result = detect_fall(features)
-                current = FallState(int(result.states[-1]))
-                message = "FALL ALERT" if current == FallState.FALLEN else "Monitoring"
-            elif time.monotonic() - started < 2.0:
-                current = FallState.UNKNOWN
+            fps = detector.fps if detector else estimated_fps(timestamps, args.fallback_fps)
+            if detector is None or not detector.calibrated:
+                message = "Stand still for 2 seconds to calibrate"
+            elif latched:
+                message = "FALL ALERT"
+            else:
+                message = "Monitoring"
 
-            cv2.imshow("Fall Detection Status", dashboard(current, fps, len(keypoints), detected, message))
+            cv2.imshow("Fall Detection Status", dashboard(current, fps, frame_count, detected, message))
             key = cv2.waitKey(30) & 0xFF
             if key in (ord("q"), ord("Q"), 27):
                 process.terminate()

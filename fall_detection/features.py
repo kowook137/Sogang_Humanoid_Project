@@ -49,13 +49,70 @@ def _weighted_point(frame: np.ndarray, indices: tuple[int, ...], threshold: floa
     return np.average(selected[valid, :2], axis=0, weights=weights).astype(np.float32)
 
 
+# The frame_* helpers below are the single source of truth for the per-frame
+# geometry. extract_features applies them across a whole recording; the
+# streaming detector applies the same functions to one live frame at a time.
+
+
+def frame_point(
+    frame: np.ndarray,
+    primary: tuple[int, ...],
+    fallback: tuple[int, ...],
+    threshold: float,
+) -> np.ndarray:
+    """Confidence-weighted center of `primary`, falling back to `fallback`."""
+    point = _weighted_point(frame, primary, threshold)
+    if not np.all(np.isfinite(point)):
+        point = _weighted_point(frame, fallback, threshold)
+    return point
+
+
+def frame_head(frame: np.ndarray, threshold: float) -> np.ndarray:
+    return frame_point(frame, (NOSE, NECK), (R_SHOULDER, L_SHOULDER), threshold)
+
+
+def frame_hip(frame: np.ndarray, threshold: float) -> np.ndarray:
+    return frame_point(frame, (MID_HIP,), (R_HIP, L_HIP), threshold)
+
+
+def frame_shoulder(frame: np.ndarray, threshold: float) -> np.ndarray:
+    return frame_point(frame, (R_SHOULDER, L_SHOULDER), (NECK,), threshold)
+
+
+def frame_torso_angle(shoulder: np.ndarray, hip: np.ndarray) -> float:
+    """Degrees between the shoulder-hip vector and the vertical axis."""
+    vector = shoulder - hip
+    if not np.all(np.isfinite(vector)):
+        return float("nan")
+    return float(np.degrees(np.arctan2(abs(float(vector[0])), abs(float(vector[1])))))
+
+
+def frame_bbox_aspect(frame: np.ndarray, threshold: float) -> float:
+    """Width/height ratio of the main body joints, or NaN when unmeasurable."""
+    body = frame[BODY_JOINTS]
+    valid = np.isfinite(body[:, 0]) & np.isfinite(body[:, 1]) & (body[:, 2] >= threshold)
+    if np.count_nonzero(valid) < 5:
+        return float("nan")
+    height = float(np.ptp(body[valid, 1]))
+    if height <= 1:
+        return float("nan")
+    return float(np.ptp(body[valid, 0])) / height
+
+
+def frame_body_height(frame: np.ndarray, threshold: float) -> float:
+    """Vertical extent of the main body joints, or NaN when unmeasurable."""
+    body = frame[BODY_JOINTS]
+    valid = np.isfinite(body[:, 1]) & (body[:, 2] >= threshold)
+    if np.count_nonzero(valid) < 5:
+        return float("nan")
+    height = float(np.ptp(body[valid, 1]))
+    return height if height > 1 else float("nan")
+
+
 def _point_series(keypoints: np.ndarray, primary: tuple[int, ...], fallback: tuple[int, ...], threshold: float) -> np.ndarray:
     result = np.full((len(keypoints), 2), np.nan, dtype=np.float32)
     for index, frame in enumerate(keypoints):
-        point = _weighted_point(frame, primary, threshold)
-        if not np.all(np.isfinite(point)):
-            point = _weighted_point(frame, fallback, threshold)
-        result[index] = point
+        result[index] = frame_point(frame, primary, fallback, threshold)
     return result
 
 
@@ -93,6 +150,16 @@ def downward_speed(values: np.ndarray, fps: float, window: int, scale: float) ->
     return change * fps / window
 
 
+def resolve_baseline_height(heights: list[float], frame_height: int) -> float:
+    """Body height used to normalize every drop/speed feature.
+
+    Shared by the offline and the streaming path so a threshold tuned on
+    recordings keeps its meaning on a live camera.
+    """
+    value = float(np.median(heights)) if len(heights) else frame_height * 0.5
+    return max(value, frame_height * 0.15)
+
+
 def extract_features(
     keypoints: np.ndarray,
     fps: float,
@@ -123,29 +190,23 @@ def extract_features(
     )
     torso_angle = rolling_median(interpolate_short_gaps(torso_angle, max_gap), radius)
 
-    bbox_aspect = np.full(len(keypoints), np.nan, dtype=np.float32)
-    body = keypoints[:, BODY_JOINTS]
-    for index, frame in enumerate(body):
-        valid = np.isfinite(frame[:, 0]) & np.isfinite(frame[:, 1]) & (frame[:, 2] >= confidence_threshold)
-        if np.count_nonzero(valid) < 5:
-            continue
-        width = float(np.ptp(frame[valid, 0]))
-        height = float(np.ptp(frame[valid, 1]))
-        if height > 1:
-            bbox_aspect[index] = width / height
+    bbox_aspect = np.asarray(
+        [frame_bbox_aspect(frame, confidence_threshold) for frame in keypoints],
+        dtype=np.float32,
+    )
     bbox_aspect = rolling_median(interpolate_short_gaps(bbox_aspect, max_gap), radius)
 
     baseline_count = min(len(keypoints), max(round(fps * 2.0), 1))
     baseline_indices = slice(0, baseline_count)
-    initial_heights: list[float] = []
-    for frame in body[baseline_indices]:
-        valid = np.isfinite(frame[:, 1]) & (frame[:, 2] >= confidence_threshold)
-        if np.count_nonzero(valid) >= 5:
-            height = float(np.ptp(frame[valid, 1]))
-            if height > 1:
-                initial_heights.append(height)
-    baseline_body_height = float(np.median(initial_heights)) if initial_heights else frame_height * 0.5
-    baseline_body_height = max(baseline_body_height, frame_height * 0.15)
+    initial_heights = [
+        height
+        for height in (
+            frame_body_height(frame, confidence_threshold)
+            for frame in keypoints[baseline_indices]
+        )
+        if np.isfinite(height)
+    ]
+    baseline_body_height = resolve_baseline_height(initial_heights, frame_height)
 
     initial_hip = hip_y[baseline_indices]
     initial_hip = initial_hip[np.isfinite(initial_hip)]

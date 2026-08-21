@@ -1,5 +1,6 @@
 # Local datasets and generated outputs
 **/data/raw_videos/
+**/data/datasets/
 **/fall_dataset/
 labels.csv
 participants.csv

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import tempfile
 import time
 from collections import deque
@@ -120,11 +121,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera-width", type=int, default=640)
     parser.add_argument("--camera-height", type=int, default=480)
     parser.add_argument("--camera-fps", type=float, default=15.0)
+    parser.add_argument(
+        "--camera-fourcc",
+        default="MJPG",
+        help="FourCC requested for camera input, for example MJPG or YUYV",
+    )
+    parser.add_argument(
+        "--preserve-camera-settings",
+        action="store_true",
+        help="Use the V4L2 format already configured on the camera without resetting it",
+    )
+    parser.add_argument(
+        "--ffmpeg-camera",
+        action="store_true",
+        help="Read a Linux camera through FFmpeg (useful for damaged MJPEG over WSL USB/IP)",
+    )
     parser.add_argument("--output", type=Path, help="Optional annotated MP4 output")
     parser.add_argument("--headless", action="store_true", help="Do not open a GUI window")
     parser.add_argument("--max-frames", type=int, default=0, help="Stop after N frames; 0 means unlimited")
     parser.add_argument("--loop", action="store_true", help="Loop a video file like a virtual webcam")
     parser.add_argument("--realtime", action="store_true", help="Pace video-file inference at its recorded FPS")
+    parser.add_argument(
+        "--no-render",
+        action="store_true",
+        help="Skip skeleton drawing (recommended for headless Jetson deployment)",
+    )
     return parser.parse_args()
 
 
@@ -137,17 +158,37 @@ def main() -> int:
     if not args.model.is_file():
         raise FileNotFoundError(f"Pose model not found: {args.model}")
 
-    capture = cv2.VideoCapture(source)
-    if isinstance(source, int):
-        capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+    ffmpeg_process: subprocess.Popen[bytes] | None = None
+    capture: cv2.VideoCapture | None = None
+    if isinstance(source, int) and args.ffmpeg_camera:
+        input_format = "mjpeg" if args.camera_fourcc.upper() == "MJPG" else "yuyv422"
+        ffmpeg_process = subprocess.Popen(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-f", "v4l2", "-input_format", input_format,
+                "-video_size", f"{args.camera_width}x{args.camera_height}",
+                "-framerate", str(args.camera_fps),
+                "-i", f"/dev/video{source}",
+                "-f", "rawvideo", "-pix_fmt", "bgr24", "-",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    else:
+        capture = cv2.VideoCapture(source)
+    if capture is not None and isinstance(source, int) and not args.preserve_camera_settings:
+        if len(args.camera_fourcc) != 4:
+            raise ValueError("--camera-fourcc must contain exactly four characters")
+        capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*args.camera_fourcc.upper()))
         capture.set(cv2.CAP_PROP_FRAME_WIDTH, args.camera_width)
         capture.set(cv2.CAP_PROP_FRAME_HEIGHT, args.camera_height)
         capture.set(cv2.CAP_PROP_FPS, args.camera_fps)
-    if not capture.isOpened():
+        capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    if capture is not None and not capture.isOpened():
         raise RuntimeError(f"Cannot open camera/video source: {source}")
-    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
-    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
-    source_fps = float(capture.get(cv2.CAP_PROP_FPS))
+    width = args.camera_width if ffmpeg_process else int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
+    height = args.camera_height if ffmpeg_process else int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
+    source_fps = args.camera_fps if ffmpeg_process else float(capture.get(cv2.CAP_PROP_FPS))
     fallback_fps = source_fps if source_fps > 1 else 10.0
     writer = None
     if args.output:
@@ -161,13 +202,27 @@ def main() -> int:
     timestamps: deque[float] = deque(maxlen=60)
     state = FallState.UNKNOWN
     processed = 0
+    inference_times: list[float] = []
     started = time.perf_counter()
     next_frame_at = started
     try:
         while True:
-            ok, frame = capture.read()
+            if ffmpeg_process:
+                assert ffmpeg_process.stdout is not None
+                expected_bytes = width * height * 3
+                data = bytearray()
+                while len(data) < expected_bytes:
+                    chunk = ffmpeg_process.stdout.read(expected_bytes - len(data))
+                    if not chunk:
+                        break
+                    data.extend(chunk)
+                ok = len(data) == expected_bytes
+                frame = np.frombuffer(data, dtype=np.uint8).reshape(height, width, 3) if ok else None
+            else:
+                assert capture is not None
+                ok, frame = capture.read()
             if not ok:
-                if args.loop and isinstance(source, str):
+                if capture is not None and args.loop and isinstance(source, str):
                     capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     poses.clear()
                     timestamps.clear()
@@ -180,7 +235,15 @@ def main() -> int:
                 if delay > 0:
                     time.sleep(delay)
                 next_frame_at += 1.0 / fallback_fps
-            prediction = model.predict(frame, imgsz=args.image_size, conf=args.confidence, device=device, verbose=False)[0]
+            inference_started = time.perf_counter()
+            prediction = model.predict(
+                frame,
+                imgsz=args.image_size,
+                conf=args.confidence,
+                device=device,
+                verbose=False,
+            )[0]
+            inference_times.append(time.perf_counter() - inference_started)
             pose = select_pose(prediction)
             poses.append(pose)
             timestamps.append(time.perf_counter())
@@ -191,31 +254,57 @@ def main() -> int:
                 features = extract_features(np.stack(poses), fps, width, height)
                 state = FallState(int(detect_fall(features).states[-1]))
 
-            annotated = prediction.plot()
-            color = (0, 0, 255) if state == FallState.FALLEN else (0, 220, 0)
-            cv2.rectangle(annotated, (10, 10), (390, 64), (0, 0, 0), -1)
-            cv2.putText(annotated, f"STATE: {state.name}  FPS: {fps:.1f}", (20, 47), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-            if writer:
-                writer.write(annotated)
+            should_render = not args.no_render and (writer is not None or not args.headless)
+            if should_render:
+                annotated = prediction.plot()
+                color = (0, 0, 255) if state == FallState.FALLEN else (0, 220, 0)
+                cv2.rectangle(annotated, (10, 10), (390, 64), (0, 0, 0), -1)
+                cv2.putText(
+                    annotated,
+                    f"STATE: {state.name}  FPS: {fps:.1f}",
+                    (20, 47),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    color,
+                    2,
+                )
+                if writer:
+                    writer.write(annotated)
             if not args.headless:
-                cv2.imshow("YOLO Pose Fall Detection", annotated)
+                display_frame = annotated if should_render else frame
+                cv2.imshow("YOLO Pose Fall Detection", display_frame)
                 if cv2.waitKey(1) & 0xFF in (ord("q"), ord("Q"), 27):
                     break
             processed += 1
             if args.max_frames and processed >= args.max_frames:
                 break
     finally:
-        capture.release()
+        if capture is not None:
+            capture.release()
+        if ffmpeg_process is not None:
+            ffmpeg_process.terminate()
+            try:
+                ffmpeg_process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                ffmpeg_process.kill()
+                ffmpeg_process.wait()
         if writer:
             writer.release()
         if not args.headless:
             cv2.destroyAllWindows()
 
     elapsed = time.perf_counter() - started
+    inference_ms = np.asarray(inference_times, dtype=np.float64) * 1000.0
+    warmup_ms = float(inference_ms[0]) if len(inference_ms) else float("nan")
+    steady_ms = inference_ms[1:] if len(inference_ms) > 1 else inference_ms
+    median_ms = float(np.median(steady_ms)) if len(steady_ms) else float("nan")
+    p95_ms = float(np.percentile(steady_ms, 95)) if len(steady_ms) else float("nan")
     print(
         f"source={source} device={device} torch={torch.__version__} "
         f"cuda={torch.version.cuda} frames={processed} elapsed={elapsed:.2f}s "
-        f"average_fps={processed / elapsed:.2f} final_state={state.name}"
+        f"average_fps={processed / elapsed:.2f} warmup_ms={warmup_ms:.2f} "
+        f"inference_median_ms={median_ms:.2f} "
+        f"inference_p95_ms={p95_ms:.2f} final_state={state.name}"
     )
     if args.output:
         print(f"output={args.output.resolve()}")

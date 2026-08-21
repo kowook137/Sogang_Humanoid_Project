@@ -15,6 +15,7 @@ from detector import FallState, detect_fall  # noqa: E402
 from features import extract_features  # noqa: E402
 from openpose_runtime import find_openpose  # noqa: E402
 from process_video import select_person  # noqa: E402
+from train_gmdcsa24 import resample  # noqa: E402
 from yolo_pose import coco_to_body25, resolve_device  # noqa: E402
 
 
@@ -41,6 +42,14 @@ class OpenPoseRuntimeTests(unittest.TestCase):
 
 
 class KeypointTests(unittest.TestCase):
+    def test_resample_rejects_empty_sequence(self) -> None:
+        with self.assertRaisesRegex(ValueError, "empty sequence"):
+            resample(np.empty((0, 3), dtype=np.float32), frames=10)
+
+    def test_resample_rejects_nonpositive_target(self) -> None:
+        with self.assertRaisesRegex(ValueError, "at least 1"):
+            resample(np.ones((2, 3), dtype=np.float32), frames=0)
+
     def test_missing_person_uses_nan_coordinates(self) -> None:
         frame = select_person([])
         self.assertEqual(frame.shape, (25, 3))

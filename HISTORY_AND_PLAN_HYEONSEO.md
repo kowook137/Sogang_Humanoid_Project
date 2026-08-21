@@ -1,6 +1,6 @@
 # 현서 담당 낙상 감지 개발 이력 및 계획
 
-최종 갱신일: 2026-08-11
+최종 갱신일: 2026-08-21
 
 ## 1. 프로젝트 목표
 
@@ -824,3 +824,108 @@ torch.cuda.is_available(): True
 Windows Conda 환경에 `ultralytics 8.4.118`을 설치하고 저장소 샘플 영상 60프레임을 GPU 0에서 처리했다. 이어서 Windows 카메라 0번을 640×480으로 열어 GPU 포즈 추론, 규칙 기반 상태 머신, 주석 MP4 저장까지 60프레임 종단 간 검증했다. 생성 영상은 MPEG-4 640×480, 60프레임이며 화면에 표시된 처리 FPS는 약 15.7이었다. 당시 카메라 화면에 전신 사람이 없었으므로 상태가 `UNKNOWN`인 것은 정상이다.
 
 `yolo_pose.py`에는 CUDA 자동 선택, 잘못된 GPU 요청의 조기 진단, 녹화 영상을 가상 웹캠처럼 반복하는 `--loop --realtime` 옵션을 추가했다. `run_yolo_gpu.bat`은 Windows에서 기본 카메라 0과 GPU 0으로 즉시 실행한다. 단위 테스트는 정적 자세, 관절 대응, 장치 인자, 합성 낙상 시퀀스의 `FALLEN` 전이를 포함해 8개가 통과했다.
+
+## 19. 공개 데이터셋 학습 기준선
+
+작업일: 2026-08-21
+
+2명·20개 자체 개발 영상에 맞춘 규칙 기반 결과만으로 일반화 성능을 주장할 수 없어서
+공개 데이터셋을 이용한 별도 학습·평가 경로를 구현했다.
+
+### GMDCSA-24
+
+Zenodo의 GMDCSA-24 v2.0, 총 160개 영상을 사용했다. 영상 복제 없이 상대 심볼릭 링크와
+매니페스트를 생성하고, YOLO11n-pose 결과를 BODY_25 호환 `(frame, 25, 3)` NPZ로
+저장했다. 같은 사람이 train과 test에 섞이지 않도록 다음과 같이 고정했다.
+
+```text
+train: Subject 1, 2 — 80개
+validation: Subject 3 — 43개
+test: Subject 4 — 37개
+```
+
+`prepare_gmdcsa24.py`, `extract_gmdcsa24_poses.py`, `train_gmdcsa24.py`를 추가했다. 학습
+모델은 96프레임으로 리샘플링한 정규화 관절 시계열을 입력으로 받는 2-layer
+bidirectional GRU다. validation F1으로 최적 epoch를 선택하고 early stopping을 적용했다.
+
+### FallVision 보조 데이터
+
+Harvard Dataverse의 20개 keypoint RAR를 검증·압축 해제하고 COCO 관절 CSV를 BODY_25
+호환 NPZ로 변환했다. 총 5,864개 시퀀스이며 낙상 3,000개, 정상 2,864개다. GMDCSA-24의
+validation/test 독립성을 보존하기 위해 전부 train에만 추가했다. 데이터 다운로드와
+생성물은 `data/datasets/` 아래에 두고 Git에서 제외한다.
+
+UR Fall RGB 70개 시퀀스의 공식 다운로드 도구도 준비했지만, 이번 보고 성능에는 UR Fall을
+사용하지 않았다.
+
+### 고정 test 결과
+
+원시 pose 특징 모델과 13개 engineered 특징 모델을 학습했다. Subject 3 validation에서만
+앙상블 가중치와 임곗값을 선택하고 Subject 4 test를 한 번 평가했다.
+
+```text
+앙상블: pose 0.3 + engineered 0.7
+threshold: 0.35
+
+Subject 4 test (37개)
+TP=16, TN=11, FP=9, FN=1
+Accuracy=72.97%
+Precision=64.00%
+Recall=94.12%
+F1=76.19%
+```
+
+현재 모델은 낙상을 거의 놓치지 않는 대신 정상 행동 오경보가 많은 방향이다. 이 수치는
+새 사람 1명의 37개 영상에 대한 첫 독립 결과로는 의미가 있지만 표본이 작다. 또한 영상
+전체 정상/낙상 분류 결과이며 실시간 낙상 시작 프레임 정확도가 아니다. 최종 연구 결과에는
+4-fold leave-one-subject-out 평균·표준편차와 실제 카메라 연속 스트림의 시간당 오경보를
+추가해야 한다.
+
+## 20. Jetson Orin Nano 배포 사전작업
+
+작업일: 2026-08-21
+
+실제 Jetson 장치가 연결되기 전에 PC에서 가능한 배포 준비를 완료했다. 초기 온디바이스
+경로는 다음과 같이 결정했다.
+
+```text
+V4L2 카메라
+  -> YOLO11n-pose TensorRT FP16 (416x416)
+  -> BODY_25 호환 관절
+  -> 규칙 기반 실시간 상태 머신
+  -> 이후 ROS 2 publisher 연결
+```
+
+GRU는 현재 영상 전체 분류기이므로 실시간 경보 경로에 억지로 연결하지 않는다. Jetson에서
+실시간 사용할 모델은 우선 프레임 단위 YOLO pose와 기존 상태 머신이다.
+
+추가한 배포 기능:
+
+- `jetson_preflight.py`: ARM64/L4T, CUDA PyTorch, OpenCV, Ultralytics, 카메라, 모델 점검
+- `run_jetson.sh`: TensorRT engine, GPU 0, 416 입력, 640×480 15 FPS 기본 실행
+- `--no-render`: 헤드리스 운용에서 골격 렌더링 비용 제거
+- 워밍업 시간과 steady-state inference median/p95 분리 출력
+- V4L2 MJPEG 설정, 카메라 버퍼 최소화 및 선택적 FFmpeg 입력
+- JetPack의 PyTorch/OpenCV를 pip wheel로 덮어쓰지 않는 설치 절차
+
+TensorRT `.engine`은 JetPack, TensorRT 및 GPU에 종속되므로 PC에서 생성해 커밋하지 않는다.
+실행할 Orin Nano 본체에서 `yolo export format=engine imgsz=416 half=True device=0`으로
+생성한다.
+
+PC에서 사전점검 JSON 출력, shell 문법, 전체 Python compile, 단위 테스트 10개와
+YOLO11n-pose 헤드리스 비렌더링 영상 추론을 확인했다. CPU 3프레임 smoke test에서는 첫
+워밍업 약 940 ms와 이후 추론 중앙값 약 29 ms가 분리되어 출력됐다. 이 수치는 Jetson
+성능 수치가 아니며 코드 경로 검증용이다.
+
+### Jetson 본체에서 남은 작업
+
+1. JetPack 버전과 Orin Nano 메모리 용량 확인
+2. NVIDIA aarch64 PyTorch 및 카메라 드라이버 설치
+3. 본체에서 TensorRT FP16 엔진 생성
+4. `tegrastats`와 함께 최소 10분 연속 실행
+5. FPS, median/p95, RAM, GPU 사용률, 온도 및 throttling 기록
+6. 로봇 정지·진동·보행 조건별 오탐과 미탐 측정
+7. ROS 2 topic 이름과 메시지 형식을 확정한 뒤 publisher 구현
+
+첫 벤치마크 목표는 입력 포함 10 FPS 이상과 p95 약 100 ms지만, 이는 실제 측정 전의
+출발점일 뿐 합격을 주장하는 수치가 아니다.

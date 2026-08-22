@@ -45,9 +45,8 @@ def resample(sequence: np.ndarray, frames: int) -> np.ndarray:
     return output
 
 
-def pose_features(path: Path) -> np.ndarray:
-    with np.load(path) as data:
-        keypoints = data["keypoints"].astype(np.float32)
+def pose_features_from_keypoints(keypoints: np.ndarray) -> np.ndarray:
+    keypoints = keypoints.astype(np.float32, copy=False)
     confidence = keypoints[:, :, 2]
     valid = np.isfinite(keypoints[:, :, :2]).all(axis=2) & (confidence > 0)
     xy = keypoints[:, :, :2].copy()
@@ -89,8 +88,13 @@ def pose_features(path: Path) -> np.ndarray:
     return np.concatenate((x, y, confidence), axis=1).astype(np.float32)
 
 
-def engineered_features(path: Path) -> np.ndarray:
-    pose = pose_features(path)
+def pose_features(path: Path) -> np.ndarray:
+    with np.load(path) as data:
+        return pose_features_from_keypoints(data["keypoints"])
+
+
+def engineered_features_from_keypoints(keypoints: np.ndarray) -> np.ndarray:
+    pose = pose_features_from_keypoints(keypoints)
     if len(pose) < 2:
         return np.zeros((len(pose), 13), dtype=np.float32)
     x, y, confidence = pose[:, :25], pose[:, 25:50], pose[:, 50:75]
@@ -120,6 +124,11 @@ def engineered_features(path: Path) -> np.ndarray:
         )
     )
     return np.nan_to_num(features, nan=0.0, posinf=8.0, neginf=-8.0).astype(np.float32)
+
+
+def engineered_features(path: Path) -> np.ndarray:
+    with np.load(path) as data:
+        return engineered_features_from_keypoints(data["keypoints"])
 
 
 class PoseDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import subprocess
 import urllib.request
 from pathlib import Path
@@ -41,6 +42,24 @@ def md5(path: Path) -> str:
     return digest.hexdigest()
 
 
+def extract_archive(source: Path, destination: Path) -> None:
+    executable = shutil.which("7z") or shutil.which("7zz")
+    if executable:
+        subprocess.run(
+            [executable, "x", "-y", "-aoa", f"-o{destination}", str(source)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+        return
+    try:
+        import py7zr
+    except ImportError as error:
+        raise RuntimeError("Install 7z or py7zr to extract FallVision archives") from error
+    destination.mkdir(parents=True, exist_ok=True)
+    with py7zr.SevenZipFile(source, mode="r") as archive:
+        archive.extractall(path=destination)
+
+
 def main() -> int:
     root = project_root() / "data/datasets/fallvision"
     archive_dir = root / "keypoints_archives"
@@ -73,11 +92,7 @@ def main() -> int:
         if checksum and md5(destination).lower() != checksum.lower():
             raise RuntimeError(f"MD5 mismatch: {destination}")
         print(f"[{index:02d}/20] extract {data['filename']}", flush=True)
-        subprocess.run(
-            ["7z", "x", "-y", "-aoa", f"-o{output_dir}", str(destination)],
-            check=True,
-            stdout=subprocess.DEVNULL,
-        )
+        extract_archive(destination, output_dir)
     csv_count = sum(1 for path in output_dir.rglob("*.csv") if path.stat().st_size)
     print(f"done archives={len(files)} csv_files={csv_count} output={output_dir}")
     return 0

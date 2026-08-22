@@ -8,6 +8,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+CLASSIFIER="${JETSON_FALL_CLASSIFIER:-${PROJECT_DIR}/outputs/fallvision_engineered_training/best_model.pt}"
+POSE_CLASSIFIER="${JETSON_POSE_CLASSIFIER:-${PROJECT_DIR}/outputs/fallvision_pose_training/best_model.pt}"
 
 find_python() {
   if [[ -n "${JETSON_PYTHON:-}" ]]; then
@@ -66,11 +68,24 @@ else
   exit 1
 fi
 
+# The GRU checkpoints are optional: without them the rule layer runs alone.
+CLASSIFIER_ARGS=()
+if [[ -f "${CLASSIFIER}" ]]; then
+  CLASSIFIER_ARGS=(--classifier "${CLASSIFIER}" --classifier-device cpu)
+fi
+if [[ -f "${POSE_CLASSIFIER}" ]]; then
+  CLASSIFIER_ARGS+=(
+    --pose-classifier "${POSE_CLASSIFIER}"
+    --classifier-pose-weight 0.45
+    --classifier-threshold 0.475
+  )
+fi
+
+echo "python=${PYTHON_BIN} model=${MODEL} classifier_args=${#CLASSIFIER_ARGS[@]}" >&2
+
 # Measured on an Orin Nano Super: eager-mode inference costs ~31 ms at every
 # input size from 256 to 640, so it is launch-overhead bound, not compute bound.
 # Shrinking the input buys no frame rate - only a TensorRT engine does.
-echo "python=${PYTHON_BIN} model=${MODEL}" >&2
-
 exec "${PYTHON_BIN}" "${SCRIPT_DIR}/yolo_pose.py" \
   --source 0 \
   --model "${MODEL}" \
@@ -81,5 +96,8 @@ exec "${PYTHON_BIN}" "${SCRIPT_DIR}/yolo_pose.py" \
   --camera-fps 15 \
   --headless \
   --no-render \
-  --status-interval 30 \
+  --status-file "${PROJECT_DIR}/outputs/live_fall_status.json" \
+  --heartbeat-seconds 1 \
+  --fall-hold-seconds 30 \
+  "${CLASSIFIER_ARGS[@]}" \
   "$@"

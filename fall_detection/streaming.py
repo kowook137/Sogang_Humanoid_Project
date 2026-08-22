@@ -135,6 +135,10 @@ class StreamingFallDetector:
         auto_clear_seconds: 0 keeps FALLEN latched until `reset_alarm()`, which
             matches the offline semantics. A positive value clears the latch
             after the person has been continuously upright for that long.
+        fall_hold_seconds: 0 keeps FALLEN latched regardless of time. A positive
+            value clears the latch that long after the last frame that still
+            confirmed a fall, whether or not the person got back up - use it
+            when a downstream consumer must eventually see the alarm end.
     """
 
     def __init__(
@@ -145,6 +149,7 @@ class StreamingFallDetector:
         confidence_threshold: float = 0.2,
         calibration_seconds: float = 2.0,
         auto_clear_seconds: float = 0.0,
+        fall_hold_seconds: float = 0.0,
     ) -> None:
         if fps <= 0:
             raise ValueError(f"FPS must be positive, got {fps}")
@@ -162,6 +167,7 @@ class StreamingFallDetector:
         self._missing_frames = max(1, round(fps * self.config.missing_confirmation_seconds))
         self._calibration_frames = max(1, round(fps * calibration_seconds))
         self._auto_clear_frames = round(fps * auto_clear_seconds) if auto_clear_seconds > 0 else 0
+        self._hold_frames = round(fps * fall_hold_seconds) if fall_hold_seconds > 0 else 0
 
         # Only the drop window is ever read back, plus a little slack.
         capacity = max(self._drop_window, self._speed_window, self._radius) + 2
@@ -182,6 +188,7 @@ class StreamingFallDetector:
         self._upright = 0
         self._state = FallState.UNKNOWN
         self._latched = False
+        self._latched_at: int | None = None
         self.first_falling_frame: int | None = None
         self.first_fallen_frame: int | None = None
 
@@ -200,11 +207,25 @@ class StreamingFallDetector:
     def reset_alarm(self) -> None:
         """Acknowledge a fall: drop the latch but keep the calibrated baseline."""
         self._latched = False
+        self._latched_at = None
         self._state = FallState.NORMAL
         self._active_until = -1
         self._candidate = 0
         self._missing = 0
         self._upright = 0
+
+    def force_fallen(self) -> None:
+        """Raise the alarm from an outside source, e.g. a learned classifier.
+
+        Goes through the same latch the rule layer uses so a caller can never
+        report FALLEN while the detector still believes otherwise.
+        """
+        self._state = FallState.FALLEN
+        self._latched = True
+        self._latched_at = self._index
+        self._upright = 0
+        if self.first_fallen_frame is None:
+            self.first_fallen_frame = self._index
 
     def update(self, keypoints: np.ndarray) -> StreamingUpdate:
         """Consume one `(25, 3)` BODY_25 frame and return the current decision."""
@@ -322,6 +343,7 @@ class StreamingFallDetector:
         if has_recent_motion and confirmed:
             self._state = FallState.FALLEN
             self._latched = True
+            self._latched_at = index
             if self.first_fallen_frame is None:
                 self.first_fallen_frame = index
 
@@ -332,6 +354,10 @@ class StreamingFallDetector:
                     self.reset_alarm()
             else:
                 self._upright = 0
+
+        if self._hold_frames and self._latched and self._latched_at is not None:
+            if index - self._latched_at >= self._hold_frames:
+                self.reset_alarm()
 
     def _score(
         self, speed: float, drop: float, angle: float, aspect: float, low_hip: float

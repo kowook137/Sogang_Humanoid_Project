@@ -91,6 +91,24 @@ class KeypointTests(unittest.TestCase):
         self.assertAlmostEqual(float(np.nanmax(np.abs(features.hip_speed))), 0.0)
         self.assertAlmostEqual(float(np.nanmax(np.abs(features.head_speed))), 0.0)
 
+    def test_feature_baseline_can_be_frozen_for_streaming(self) -> None:
+        keypoints = np.zeros((30, 25, 3), dtype=np.float32)
+        keypoints[:, :, 0] = np.linspace(100, 200, 25)
+        keypoints[:, :, 1] = np.linspace(50, 350, 25)
+        keypoints[:, :, 2] = 1.0
+
+        features = extract_features(
+            keypoints,
+            fps=10.0,
+            frame_width=640,
+            frame_height=480,
+            baseline_body_height=321.0,
+            baseline_hip_y=222.0,
+        )
+
+        self.assertEqual(features.baseline_body_height, 321.0)
+        self.assertEqual(features.baseline_hip_y, 222.0)
+
     def test_coco_pose_maps_centers_to_body25(self) -> None:
         xy = np.arange(34, dtype=np.float32).reshape(17, 2)
         confidence = np.ones(17, dtype=np.float32)
@@ -205,6 +223,38 @@ class StreamingDetectorTests(unittest.TestCase):
 
         # Only the drop window is ever read back, so memory must not track runtime.
         self.assertLessEqual(detector._hip.smooth._data.size, 64)
+
+    def test_fall_hold_clears_the_latch_after_the_configured_time(self) -> None:
+        """Time-based release, for a consumer that must eventually see it end."""
+        detector = StreamingFallDetector(fps=10.0, frame_height=480, fall_hold_seconds=5.0)
+        for index in range(60):  # fall at 2 s, confirmed well before the hold ends
+            detector.update(falling_frame(index, fall_start=20, fall_frames=10))
+        self.assertTrue(detector.fall_latched)
+        for index in range(60, 200):  # motionless on the floor past the 5 s hold
+            detector.update(falling_frame(index, fall_start=20, fall_frames=10))
+
+        self.assertFalse(detector.fall_latched)
+
+    def test_fall_hold_of_zero_keeps_the_alarm_for_the_session(self) -> None:
+        detector = StreamingFallDetector(fps=10.0, frame_height=480, fall_hold_seconds=0.0)
+        for index in range(600):
+            detector.update(falling_frame(index, fall_start=20, fall_frames=10))
+
+        self.assertTrue(detector.fall_latched)
+        self.assertEqual(detector.state, FallState.FALLEN)
+
+    def test_force_fallen_raises_the_alarm_through_the_same_latch(self) -> None:
+        """The classifier path must not report FALLEN behind the detector's back."""
+        detector = StreamingFallDetector(fps=10.0, frame_height=480)
+        standing = falling_frame(0, fall_start=10_000, fall_frames=10)
+        for _ in range(40):
+            detector.update(standing)
+        self.assertEqual(detector.state, FallState.NORMAL)
+        detector.force_fallen()
+
+        self.assertEqual(detector.state, FallState.FALLEN)
+        self.assertTrue(detector.fall_latched)
+        self.assertEqual(detector.update(standing).state, FallState.FALLEN)
 
     def test_rejects_a_batch_instead_of_a_single_frame(self) -> None:
         detector = StreamingFallDetector(fps=10.0, frame_height=480)

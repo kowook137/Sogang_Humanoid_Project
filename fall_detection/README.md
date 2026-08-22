@@ -580,6 +580,41 @@ Orin Nano는 CPU와 GPU가 8GB를 공유한다. 데스크톱 세션(Chrome, VS C
 `CUBLAS_STATUS_ALLOC_FAILED`로 실패한 사례를 확인했다. 실제 운용은 헤드리스로 하고,
 사전점검의 가용 메모리 warning을 확인한다.
 
+### 상태 발행과 GRU 앙상블
+
+판정은 스트리밍 규칙 계층(`streaming.py`, 프레임당 0.9 ms 고정)이 담당하고, 학습 모델은
+그 위에서 경보를 **올리기만** 한다. `outputs/fallvision_engineered_training/best_model.pt`와
+`outputs/fallvision_pose_training/best_model.pt`가 있으면 공개 FallVision 관절 시퀀스로
+학습한 두 GRU를 `pose 0.45 + engineered 0.55`, threshold 0.475로 앙상블한다. GRU 확률만으로
+경보하지 않고, 수평 자세 증거(`torso_angle >= 40°` 또는 `bbox_aspect >= 0.70`)가 함께
+0.5초 이상 유지될 때만 `FALLEN`으로 확정한다. 모델이 없으면 규칙 계층만 사용한다.
+
+상태는 `--heartbeat-seconds` 주기(기본 1초)와 상태 변화 시점에 표준 출력의 `FALL_STATUS`
+JSON과 아래 파일로 원자적으로 갱신된다.
+
+```text
+outputs/live_fall_status.json
+```
+
+`FALLEN` 해제 정책은 두 가지이며 함께 쓸 수 있다.
+
+- `--fall-hold-seconds` (기본 30): 마지막 확정 프레임에서 이 시간이 지나면 해제한다.
+  `0`이면 재시작 전까지 유지한다. 쓰러진 사람이 움직이지 않아도 30초 뒤 `NORMAL`로
+  돌아가므로, 무인 감시가 목적이면 `run_jetson.sh --fall-hold-seconds 0`으로 운용한다.
+- `--auto-clear-seconds` (기본 0=비활성): 사람이 이 시간만큼 연속으로 일어서 있으면 해제한다.
+
+현재 PC에서 준비된 소스·YOLO `.pt`·GRU 체크포인트를 Jetson으로 옮길 번들은 다음과 같이
+만든다. TensorRT `.engine`은 이 번들에 넣지 않으며 Jetson 본체에서 생성한다.
+
+```bash
+chmod +x fall_detection/make_jetson_bundle.sh
+fall_detection/make_jetson_bundle.sh
+```
+
+FallVision 앙상블의 clip-level test 결과는 accuracy 93.2%, precision 91.3%, recall 95.75%,
+F1 93.45%다. 이 개발 성능은 참가자 ID가 없는 clip-level 분할 결과이므로 실제
+카메라 정확도로 해석하지 않는다. 현장 영상과 참가자 독립 데이터로 반드시 재검증한다.
+
 ### 본체에서 반드시 기록할 항목
 
 - `tegrastats`의 RAM, GPU 사용률, 온도와 throttling 여부

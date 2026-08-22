@@ -166,6 +166,8 @@ def extract_features(
     frame_width: int,
     frame_height: int,
     confidence_threshold: float = 0.2,
+    baseline_body_height: float | None = None,
+    baseline_hip_y: float | None = None,
 ) -> PoseFeatures:
     if keypoints.ndim != 3 or keypoints.shape[1:] != (25, 3):
         raise ValueError(f"Expected keypoints shape (frames, 25, 3), got {keypoints.shape}")
@@ -206,11 +208,16 @@ def extract_features(
         )
         if np.isfinite(height)
     ]
-    baseline_body_height = resolve_baseline_height(initial_heights, frame_height)
+    if baseline_body_height is None:
+        baseline_body_height = resolve_baseline_height(initial_heights, frame_height)
+    baseline_body_height = max(float(baseline_body_height), frame_height * 0.15)
 
     initial_hip = hip_y[baseline_indices]
     initial_hip = initial_hip[np.isfinite(initial_hip)]
-    baseline_hip_y = float(np.median(initial_hip)) if initial_hip.size else frame_height * 0.5
+    measured_hip_y = float(np.median(initial_hip)) if initial_hip.size else frame_height * 0.5
+    if baseline_hip_y is None:
+        baseline_hip_y = measured_hip_y
+    baseline_hip_y = float(baseline_hip_y)
 
     speed_window = max(1, round(fps * 0.4))
     drop_window = max(1, round(fps * 1.0))

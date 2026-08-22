@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import tempfile
@@ -19,7 +20,7 @@ import numpy as np
 import torch
 from ultralytics import YOLO
 
-from detector import FallState
+from detector import DetectorConfig, FallState
 from streaming import StreamingFallDetector
 
 
@@ -122,7 +123,10 @@ def select_pose(result: object) -> np.ndarray:
         return missing
     xy = result.keypoints.xy.cpu().numpy()
     confidence = result.keypoints.conf.cpu().numpy()
-    selected = int(np.argmax(np.mean(confidence, axis=1)))
+    spans = np.ptp(xy, axis=1)
+    areas = np.maximum(spans[:, 0], 1.0) * np.maximum(spans[:, 1], 1.0)
+    scores = areas * np.mean(confidence, axis=1) * np.mean(confidence > 0.2, axis=1)
+    selected = int(np.argmax(scores))
     return coco_to_body25(xy[selected], confidence[selected])
 
 
@@ -168,16 +172,106 @@ def parse_args() -> argparse.Namespace:
         help="Clear a FALLEN latch after the person is upright this long; 0 keeps it latched",
     )
     parser.add_argument(
-        "--status-interval",
+        "--fall-hold-seconds",
         type=float,
-        default=0.0,
-        help="Print a status line every N seconds (headless soak testing); 0 disables",
+        default=30.0,
+        help="Clear a FALLEN latch this long after the last confirming frame; 0 latches until restart",
     )
+    parser.add_argument(
+        "--status-file",
+        type=Path,
+        help="Atomically update this JSON file with the current fall-detection status",
+    )
+    parser.add_argument(
+        "--heartbeat-seconds",
+        type=float,
+        default=1.0,
+        help="Write/print status at least this often; 0 only reports state changes",
+    )
+    defaults = DetectorConfig()
+    parser.add_argument("--min-downward-speed", type=float, default=defaults.min_downward_speed)
+    parser.add_argument("--min-drop", type=float, default=defaults.min_drop)
+    parser.add_argument("--min-torso-angle", type=float, default=defaults.min_torso_angle)
+    parser.add_argument("--min-bbox-aspect", type=float, default=defaults.min_bbox_aspect)
+    parser.add_argument("--min-low-hip", type=float, default=defaults.min_low_hip)
+    parser.add_argument("--classifier", type=Path, help="Optional engineered-feature GRU checkpoint")
+    parser.add_argument("--pose-classifier", type=Path, help="Optional raw-pose GRU checkpoint")
+    parser.add_argument("--classifier-device", default="cpu", help="PyTorch device for the small GRU")
+    parser.add_argument("--classifier-threshold", type=float, default=0.80)
+    parser.add_argument("--classifier-pose-weight", type=float, default=0.45)
+    parser.add_argument("--classifier-window-seconds", type=float, default=4.0)
+    parser.add_argument("--classifier-confirm-seconds", type=float, default=0.5)
+    parser.add_argument("--classifier-interval", type=int, default=3, help="Run GRU every N pose frames")
     return parser.parse_args()
+
+
+def publish_status(
+    path: Path | None,
+    state: FallState,
+    frame: int,
+    fps: float,
+    inference_ms: float,
+    reason: str,
+    fall_probability: float | None = None,
+    latched: bool = False,
+    calibrating: bool = False,
+) -> None:
+    payload = {
+        "schema": 1,
+        "timestamp": time.time(),
+        "state": state.name,
+        "fall_detected": state == FallState.FALLEN,
+        "fall_latched": latched,
+        "calibrating": calibrating,
+        "frame": frame,
+        "fps": round(fps, 3),
+        "inference_ms": round(inference_ms, 3),
+        "reason": reason,
+        "fall_probability": round(fall_probability, 4) if fall_probability is not None else None,
+    }
+    print("FALL_STATUS " + json.dumps(payload, separators=(",", ":")), flush=True)
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
 
 
 def main() -> int:
     args = parse_args()
+    if args.heartbeat_seconds < 0 or args.fall_hold_seconds < 0:
+        raise ValueError("--heartbeat-seconds and --fall-hold-seconds cannot be negative")
+    if not 0 < args.classifier_threshold < 1:
+        raise ValueError("--classifier-threshold must be between 0 and 1")
+    if not 0 <= args.classifier_pose_weight <= 1:
+        raise ValueError("--classifier-pose-weight must be between 0 and 1")
+    if args.classifier_window_seconds <= 0 or args.classifier_confirm_seconds <= 0:
+        raise ValueError("classifier window and confirmation seconds must be positive")
+    if args.classifier_interval < 1:
+        raise ValueError("--classifier-interval must be at least 1")
+    detector_config = DetectorConfig(
+        min_downward_speed=args.min_downward_speed,
+        min_drop=args.min_drop,
+        min_torso_angle=args.min_torso_angle,
+        min_bbox_aspect=args.min_bbox_aspect,
+        min_low_hip=args.min_low_hip,
+    )
+    classifier = None
+    if args.classifier:
+        if not args.classifier.is_file():
+            raise FileNotFoundError(f"Classifier checkpoint not found: {args.classifier}")
+        from realtime_classifier import RealtimeFallClassifier
+
+        classifier = RealtimeFallClassifier(args.classifier, args.classifier_device)
+    pose_classifier = None
+    if args.pose_classifier:
+        if not args.pose_classifier.is_file():
+            raise FileNotFoundError(f"Pose classifier checkpoint not found: {args.pose_classifier}")
+        from realtime_classifier import RealtimeFallClassifier
+
+        pose_classifier = RealtimeFallClassifier(args.pose_classifier, args.classifier_device)
+    classifier_enabled = classifier is not None or pose_classifier is not None
     source = parse_source(args.source)
     device = resolve_device(args.device)
     if isinstance(source, str) and not Path(source).expanduser().is_file():
@@ -233,19 +327,28 @@ def main() -> int:
         detector = StreamingFallDetector(
             fps=fallback_fps,
             frame_height=height,
+            config=detector_config,
             auto_clear_seconds=args.auto_clear_seconds,
+            fall_hold_seconds=args.fall_hold_seconds,
         )
     pending: list[np.ndarray] = []
     state = FallState.UNKNOWN
     latched = False
     calibrating = True
     fps = fallback_fps
+    published_state: FallState | None = None
+    last_published_at = float("-inf")
+    fall_probability: float | None = None
+    classifier_candidate_count = 0
+    # The rule layer runs incrementally and keeps no history, but the GRU reads
+    # a raw pose window, so only pay for the buffer when a checkpoint is loaded.
+    poses: deque[np.ndarray] = deque(
+        maxlen=max(60, round(fallback_fps * 15)) if classifier_enabled else 0
+    )
     processed = 0
     inference_times: list[float] = []
     started = time.perf_counter()
     next_frame_at = started
-    next_status_at = started
-    previous_state = state
     try:
         while True:
             if ffmpeg_process:
@@ -269,10 +372,14 @@ def main() -> int:
                     detector = StreamingFallDetector(
                         fps=fallback_fps,
                         frame_height=height,
+                        config=detector_config,
                         auto_clear_seconds=args.auto_clear_seconds,
+                        fall_hold_seconds=args.fall_hold_seconds,
                     )
                     state = FallState.UNKNOWN
                     latched = False
+                    calibrating = True
+                    classifier_candidate_count = 0
                     next_frame_at = time.perf_counter()
                     continue
                 break
@@ -292,6 +399,7 @@ def main() -> int:
             inference_times.append(time.perf_counter() - inference_started)
             pose = select_pose(prediction)
             timestamps.append(time.perf_counter())
+            poses.append(pose)
             if detector is None:
                 pending.append(pose)
                 if len(pending) >= FPS_PROBE_FRAMES:
@@ -299,7 +407,9 @@ def main() -> int:
                     detector = StreamingFallDetector(
                         fps=fps,
                         frame_height=height,
+                        config=detector_config,
                         auto_clear_seconds=args.auto_clear_seconds,
+                        fall_hold_seconds=args.fall_hold_seconds,
                     )
                     for buffered in pending:
                         update = detector.update(buffered)
@@ -312,17 +422,67 @@ def main() -> int:
                 calibrating = update.calibrating
                 fps = detector.fps
 
-            if args.status_interval > 0 or state != previous_state:
-                now = time.perf_counter()
-                if state != previous_state or now >= next_status_at:
-                    print(
-                        f"t={now - started:7.1f}s frame={processed:6d} state={state.name:<14}"
-                        f" latched={latched} fps={fps:5.1f}",
-                        flush=True,
+            # A learned second opinion on top of the rule layer. It only ever
+            # raises the alarm, and only when the geometry agrees, so a GRU that
+            # fires on an unusual-looking but upright pose cannot trip it alone.
+            if (
+                detector is not None
+                and classifier_enabled
+                and not calibrating
+                and processed % args.classifier_interval == 0
+            ):
+                classifier_frames = max(15, round(fps * args.classifier_window_seconds))
+                # Slice before stacking: the buffer holds far more than the window.
+                classifier_poses = np.stack(list(poses)[-classifier_frames:])
+                engineered_probability = (
+                    classifier.probability(classifier_poses) if classifier is not None else None
+                )
+                pose_probability = (
+                    pose_classifier.probability(classifier_poses)
+                    if pose_classifier is not None
+                    else None
+                )
+                if engineered_probability is not None and pose_probability is not None:
+                    fall_probability = (
+                        args.classifier_pose_weight * pose_probability
+                        + (1.0 - args.classifier_pose_weight) * engineered_probability
                     )
-                    previous_state = state
-                    if args.status_interval > 0:
-                        next_status_at = now + args.status_interval
+                else:
+                    fall_probability = (
+                        engineered_probability
+                        if engineered_probability is not None
+                        else pose_probability
+                    )
+                posture_evidence = update.torso_angle >= 40.0 or update.bbox_aspect >= 0.70
+                if fall_probability >= args.classifier_threshold and posture_evidence:
+                    classifier_candidate_count += args.classifier_interval
+                else:
+                    classifier_candidate_count = max(
+                        0, classifier_candidate_count - args.classifier_interval
+                    )
+                if classifier_candidate_count >= max(1, round(fps * args.classifier_confirm_seconds)):
+                    # Go through the detector so its latch, and everything read
+                    # back from it, stays the single source of truth.
+                    detector.force_fallen()
+                    state, latched = detector.state, detector.fall_latched
+
+            now = time.perf_counter()
+            state_changed = state != published_state
+            heartbeat_due = args.heartbeat_seconds > 0 and now - last_published_at >= args.heartbeat_seconds
+            if state_changed or heartbeat_due:
+                publish_status(
+                    args.status_file,
+                    state,
+                    processed,
+                    fps,
+                    inference_times[-1] * 1000.0,
+                    "state_change" if state_changed else "heartbeat",
+                    fall_probability,
+                    latched=latched,
+                    calibrating=calibrating,
+                )
+                published_state = state
+                last_published_at = now
 
             should_render = not args.no_render and (writer is not None or not args.headless)
             if should_render:

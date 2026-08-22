@@ -67,6 +67,24 @@ class KeypointTests(unittest.TestCase):
         self.assertAlmostEqual(float(np.nanmax(np.abs(features.hip_speed))), 0.0)
         self.assertAlmostEqual(float(np.nanmax(np.abs(features.head_speed))), 0.0)
 
+    def test_feature_baseline_can_be_frozen_for_streaming(self) -> None:
+        keypoints = np.zeros((30, 25, 3), dtype=np.float32)
+        keypoints[:, :, 0] = np.linspace(100, 200, 25)
+        keypoints[:, :, 1] = np.linspace(50, 350, 25)
+        keypoints[:, :, 2] = 1.0
+
+        features = extract_features(
+            keypoints,
+            fps=10.0,
+            frame_width=640,
+            frame_height=480,
+            baseline_body_height=321.0,
+            baseline_hip_y=222.0,
+        )
+
+        self.assertEqual(features.baseline_body_height, 321.0)
+        self.assertEqual(features.baseline_hip_y, 222.0)
+
     def test_coco_pose_maps_centers_to_body25(self) -> None:
         xy = np.arange(34, dtype=np.float32).reshape(17, 2)
         confidence = np.ones(17, dtype=np.float32)

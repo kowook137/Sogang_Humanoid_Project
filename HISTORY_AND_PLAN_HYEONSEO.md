@@ -1,6 +1,6 @@
 # 현서 담당 낙상 감지 개발 이력 및 계획
 
-최종 갱신일: 2026-08-21
+최종 갱신일: 2026-08-22
 
 ## 1. 프로젝트 목표
 
@@ -929,3 +929,188 @@ YOLO11n-pose 헤드리스 비렌더링 영상 추론을 확인했다. CPU 3프�
 
 첫 벤치마크 목표는 입력 포함 10 FPS 이상과 p95 약 100 ms지만, 이는 실제 측정 전의
 출발점일 뿐 합격을 주장하는 수치가 아니다.
+
+## 21. FallVision 재학습 및 고재현율 앙상블
+
+작업일: 2026-08-22
+
+Jetson 실시간 경로의 규칙 기반 판정만으로 충분한지 확인하기 위해 Harvard Dataverse의
+FallVision 공개 관절 데이터 20개 RAR를 실제로 다운로드하고 검증·압축 해제했다. 시스템에
+`7z`가 없는 환경도 처리할 수 있도록 다운로드 도구에 `7zz` 탐색과 Python 압축 해제
+fallback을 추가했다.
+
+준비된 데이터는 총 5,864개 시퀀스다.
+
+```text
+낙상: 3,000개
+정상: 2,864개
+bed: 1,883개
+chair: 1,951개
+stand: 2,030개
+```
+
+FallVision 공개 매니페스트에는 참가자 ID가 없어서 사람 단위 분할을 만들 수 없었다.
+따라서 라벨과 동작 종류별 비율을 유지하는 결정적 clip-level 분할을 별도로 만들었다.
+
+```text
+train: 4,104개
+validation: 879개
+test: 881개
+```
+
+빈 시퀀스와 15프레임 미만 시퀀스는 학습·평가에서 제외되어 실제 validation/test 평가
+샘플은 각각 875개와 878개다. 이 분할은 같은 참가자가 여러 split에 섞일 가능성이 있으므로
+참가자 독립 일반화 성능으로 해석하면 안 된다.
+
+기존 규칙 기반 상태 머신을 FallVision 전체에 30 FPS로 가정해 평가한 결과는 다음과 같다.
+
+```text
+TP=1,139, TN=2,802, FP=62, FN=1,861
+Accuracy=67.21%
+Precision=94.84%
+Recall=37.97%
+F1=54.23%
+```
+
+규칙은 오경보가 적고 정밀도가 높지만 낙상을 많이 놓치는 보수적인 판정기였다. 임곗값을
+완화한 후보도 recall 44.27%에 그쳐 기본 임곗값을 공개 데이터 결과만 보고 교체하지 않았다.
+
+대신 다음 두 개의 2-layer bidirectional GRU를 각각 학습했다.
+
+- 원시 pose 모델: 정규화된 25개 관절의 `(x, y, confidence)` 75차원 시계열
+- engineered 모델: 골반·머리·몸통·bbox·속도 등 13차원 시계열
+
+단일 모델 test 결과:
+
+```text
+engineered GRU
+Accuracy=92.03%, Precision=89.68%, Recall=95.30%, F1=92.41%
+
+pose GRU
+Accuracy=92.60%, Precision=91.34%, Recall=94.41%, F1=92.85%
+```
+
+test 결과를 보지 않고 validation에서 낙상 recall 95% 이상을 만족하면서 precision을
+최대화하도록 가중치와 임곗값을 선택했다.
+
+```text
+pose weight: 0.45
+engineered weight: 0.55
+threshold: 0.475
+
+고정 test 878개
+TP=428, TN=390, FP=41, FN=19
+Accuracy=93.17%
+Precision=91.26%
+Recall=95.75%
+F1=93.45%
+```
+
+이 결과는 잘라진 영상 전체의 `normal/fall` 분류 성능이다. 실시간 연속 스트림의 낙상
+시작 시점, 감지 지연, 시간당 오경보와는 다른 지표다. 또한 clip-level 분할 한계 때문에
+최종 보고 수치로 사용하려면 참가자 ID가 있는 GMDCSA-24의 4-fold 평가 또는 자체 촬영
+참가자 독립 테스트가 필요하다.
+
+## 22. 규칙+GRU 실시간 통합 및 배포 번들
+
+작업일: 2026-08-22
+
+영상 전체 분류용 GRU를 그대로 단독 경보기로 사용하지 않고, 최근 4초 관절 윈도에 대한
+보조 증거로 실시간 실행기에 연결했다.
+
+```text
+V4L2 카메라
+  -> YOLO11n-pose TensorRT FP16 416x416
+  -> BODY_25 호환 관절
+  -> 규칙 기반 상태 머신
+  -> pose 0.45 + engineered 0.55 GRU 앙상블
+  -> 높은 확률 + 수평 자세 0.5초 지속
+  -> FALLEN
+```
+
+Jetson CPU 부하를 줄이기 위해 작은 GRU 두 개는 기본적으로 3포즈 프레임마다 실행한다.
+GRU 확률만으로 `FALLEN`을 선언하지 않고 몸통 각도 또는 bbox 비율의 수평 자세 증거를 함께
+요구한다. 규칙 기반 감지 결과도 유지하므로 두 경로 중 하나가 확정 조건을 충족하면 경보한다.
+
+실시간 운용을 위해 다음도 보완했다.
+
+- 초기 약 2초의 신체 높이와 골반 위치를 고정하여 rolling window가 이동해도 기준이 변하지 않음
+- 여러 사람이 보이면 관절 신뢰도와 화면 면적을 함께 사용해 가장 크게 보이는 사람 선택
+- `FALLEN` 기본 30초 latch, `--fall-hold-seconds 0`이면 재시작 전까지 유지
+- 상태 변화와 heartbeat를 `FALL_STATUS` JSON Lines로 표준 출력
+- `outputs/live_fall_status.json`을 임시 파일 교체 방식으로 원자적 갱신
+- 규칙 임곗값, GRU 가중치·임곗값·윈도·실행 간격을 CLI로 조정 가능
+- 모델과 실행 코드를 묶는 `make_jetson_bundle.sh` 추가
+
+공식 Ultralytics 샘플을 이용한 PC CPU 종단 간 smoke test에서 두 GRU 앙상블까지 실행해
+`UNKNOWN -> NORMAL`, 상태 JSON 갱신을 확인했다. 35프레임 결과는 다음과 같다.
+
+```text
+average FPS=26.34
+YOLO warmup=546.29 ms
+steady inference median=19.00 ms
+steady inference p95=23.89 ms
+final state=NORMAL
+```
+
+Windows DirectShow 카메라 0에서도 640x480, 15 FPS로 118프레임을 녹화하고 WSL의 전체
+파이프라인에 전달했다. 전체 프레임 처리와 주석 영상·상태 JSON 생성을 확인했으며 YOLO
+steady median은 19.04 ms, p95는 23.30 ms였다. 촬영 구도에 얼굴과 상체만 보이고 골반·다리가
+보이지 않아 마지막 숙임 동작이 `FALLING`으로 끝났다. 이는 실제 낙상 확정이 아니라 전신이
+보이지 않는 구도에서 규칙 기반 초기 기준이 불안정해지는 사례로 기록한다.
+
+최신 Jetson 번들은 다음 로컬 산출물로 생성했다.
+
+```text
+outputs/sogang_fall_jetson_bundle.tar.gz
+크기: 약 7.2 MB
+SHA-256: 850db2cb6a788c943fce2c07afadd42a53d40c989c49185a06a333daea5a7915
+```
+
+번들에는 낙상 감지 소스, YOLO11n-pose `.pt`, pose GRU와 engineered GRU가 포함된다.
+TensorRT `.engine`은 JetPack·TensorRT·GPU에 종속되므로 Jetson 본체에서 생성한다. 공개
+데이터, 가상환경, 모델 가중치와 생성 결과는 Git에서 제외하며 배포 번들로 별도 전달한다.
+
+### 현재 성능 표현과 목표
+
+```text
+현재 공개 clip-level recall: 95.75%
+현재 공개 clip-level precision: 91.26%
+Jetson 실제 연속 스트림 감지율: 아직 미측정
+```
+
+1차 현장 목표:
+
+- 참가자 독립 낙상 recall 90% 이상
+- precision 85% 이상, F1 88% 이상
+- 낙상 후 2초 이내 감지
+- 시간당 오경보 1회 이하
+- Jetson 입력 포함 10 FPS 이상, p95 약 100 ms 이하
+
+최종 목표는 recall 95% 이상, precision 90% 이상, 시간당 오경보 0.1회 이하, 감지 지연
+1.5초 이하, Jetson 15 FPS 지속 실행이다.
+
+### 남은 필수 작업
+
+1. Jetson 본체에서 JetPack·PyTorch·카메라 환경 확정
+2. 본체에서 YOLO11n-pose TensorRT FP16 엔진 생성
+3. `tegrastats`와 함께 최소 10분 연속 실행 및 온도·throttling 기록
+4. 전신이 보이는 실제 설치 구도에서 새 참가자 낙상·정상 혼동 동작 촬영
+5. 참가자 독립 recall/precision/F1과 시간당 오경보 측정
+6. 로봇 정지·진동·보행 조건별 성능 비교
+7. ROS 2 topic과 메시지 형식 확정 후 publisher 연결
+
+## 23. Git 반영 상태
+
+작업일: 2026-08-22
+
+Jetson 실시간 낙상 감지 개선 코드는 다음 로컬 커밋으로 정리했다.
+
+```text
+ffdbd30694f4f0cc59c75b2f5c31ca8f36ca6268
+feat: improve Jetson real-time fall detection
+```
+
+단위 테스트 11개, 전체 Python compile, `run_jetson.sh`와 `make_jetson_bundle.sh` 문법 검사,
+두 GRU 앙상블 smoke test를 통과했다. GitHub 원격 `origin/main` 푸시는 현재 WSL 환경에
+GitHub HTTPS 인증 정보가 없어 완료되지 않았다. 인증 후 `git push origin main`이 필요하다.

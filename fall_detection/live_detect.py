@@ -14,18 +14,10 @@ import cv2
 import numpy as np
 
 from detector import FallState
+from overlay import STATE_COLORS, gui_available
 from process_video import select_person
 from streaming import StreamingFallDetector
 from openpose_runtime import find_openpose
-
-
-STATE_COLORS = {
-    FallState.NORMAL: (0, 200, 0),
-    FallState.FALLING: (0, 200, 255),
-    FallState.FALL_CANDIDATE: (0, 120, 255),
-    FallState.FALLEN: (0, 0, 255),
-    FallState.UNKNOWN: (160, 160, 160),
-}
 
 
 FPS_PROBE_FRAMES = 15
@@ -126,6 +118,13 @@ def main() -> int:
     current = FallState.UNKNOWN
     detected = False
     latched = False
+    if not gui_available():
+        raise SystemExit(
+            "This OpenCV build cannot open a window (GUI: NONE), which is what\n"
+            "opencv-python-headless gives you. Install the GUI build instead:\n"
+            "  python3.10 -m pip uninstall -y opencv-python-headless\n"
+            "  python3.10 -m pip install --user --no-deps opencv-python==4.11.0.86"
+        )
     cv2.namedWindow("Fall Detection Status", cv2.WINDOW_NORMAL)
 
     try:

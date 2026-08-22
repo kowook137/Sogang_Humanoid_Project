@@ -521,13 +521,46 @@ blocker(실행 불가)와 warning(성능 저하)을 분리해 보고한다. 카�
 
 ### 실행
 
+실행기는 두 개이며, 환경 탐색(인터프리터·모델·GRU 체크포인트)은 `jetson_env.sh` 하나를
+공유한다. TensorRT 엔진이 있으면 그것을, 없으면 `.pt` 가중치를 자동으로 쓴다. 엔진이
+없다고 실패하지 않는다.
+
 ```bash
-fall_detection/run_jetson.sh                 # 카메라 0, GPU 0, 헤드리스
-fall_detection/run_jetson.sh --source 1      # 뒤에 붙인 인자가 기본값을 덮어쓴다
+fall_detection/run_camera.sh                 # 데스크톱에 창을 띄우는 실시간 화면
+fall_detection/run_jetson.sh                 # 무인 운용, 헤드리스, 상태를 파일로 발행
+fall_detection/run_camera.sh --source 1      # 뒤에 붙인 인자가 기본값을 덮어쓴다
 ```
 
-TensorRT 엔진이 있으면 그것을, 없으면 `.pt` 가중치를 자동으로 쓴다. 엔진이 없다고
-실패하지 않는다.
+`run_camera.sh`는 골격과 상태를 얹은 카메라 영상을 창으로 보여준다. 창에서 `Q`/`ESC`는
+종료, `R`은 울린 경보 해제다. SSH로 접속했다면 Jetson 데스크톱의 디스플레이를 지정한다.
+
+```bash
+DISPLAY=:0 fall_detection/run_camera.sh
+```
+
+낙상이 확정되면 상태 글자가 빨갛게 바뀌고 화면 테두리에 빨간 띠가 그려진다. 데모용으로
+`--auto-clear-seconds 5`가 기본이라 사람이 다시 일어서면 5초 뒤 자동으로 풀린다.
+`run_jetson.sh`는 반대로 `--fall-hold-seconds 0`이라 재시작하거나 소비자가 확인할
+때까지 경보를 유지한다. 무인 감시에서 쓰러진 사람이 조용히 `NORMAL`로 돌아가면 안 되기
+때문이다.
+
+#### 창이 뜨지 않을 때: OpenCV 빌드 확인
+
+`opencv-python-headless`에는 GUI가 없어 `imshow`가 아예 동작하지 않는다. 무인 로봇에는
+맞는 선택이지만 `run_camera.sh`에는 맞지 않는다. 두 실행기 모두 시작 시점에 이를 확인해
+아래 명령을 안내한다.
+
+```bash
+/usr/bin/python3.10 -c "import cv2; print([l for l in cv2.getBuildInformation().splitlines() if l.strip().startswith('GUI:')])"
+```
+
+`GUI: NONE`이면 같은 버전의 GUI 빌드로 교체한다. `--no-deps`가 핵심이다. 빼면 NumPy 2.x가
+딸려 들어와 OpenCV ABI가 깨진다.
+
+```bash
+/usr/bin/python3.10 -m pip uninstall -y opencv-python-headless
+/usr/bin/python3.10 -m pip install --user --no-deps opencv-python==4.11.0.86
+```
 
 ### 측정된 성능 (2026-08-22, 데스크톱 세션이 함께 떠 있는 상태)
 
@@ -596,12 +629,15 @@ JSON과 아래 파일로 원자적으로 갱신된다.
 outputs/live_fall_status.json
 ```
 
-`FALLEN` 해제 정책은 두 가지이며 함께 쓸 수 있다.
+`FALLEN` 해제 정책은 두 가지이며 함께 쓸 수 있다. 둘 다 `streaming.py`의 latch가
+소유하므로, 화면·상태 파일·표준 출력이 서로 다른 상태를 보고하는 일은 없다.
 
-- `--fall-hold-seconds` (기본 30): 마지막 확정 프레임에서 이 시간이 지나면 해제한다.
-  `0`이면 재시작 전까지 유지한다. 쓰러진 사람이 움직이지 않아도 30초 뒤 `NORMAL`로
-  돌아가므로, 무인 감시가 목적이면 `run_jetson.sh --fall-hold-seconds 0`으로 운용한다.
-- `--auto-clear-seconds` (기본 0=비활성): 사람이 이 시간만큼 연속으로 일어서 있으면 해제한다.
+- `--fall-hold-seconds`: 마지막 확정 프레임에서 이 시간이 지나면 해제한다. `0`이면
+  재시작하거나 `R` 키로 확인할 때까지 유지한다. 쓰러진 사람이 움직이지 않아도 시간이
+  지나면 `NORMAL`로 돌아가므로 **두 실행기 모두 `0`으로 운용한다.** `yolo_pose.py`를
+  직접 호출할 때의 기본값만 30이다.
+- `--auto-clear-seconds`: 사람이 이 시간만큼 연속으로 **일어서 있으면** 해제한다.
+  `run_camera.sh`는 데모를 반복할 수 있도록 `5`, `run_jetson.sh`는 비활성(`0`)이다.
 
 현재 PC에서 준비된 소스·YOLO `.pt`·GRU 체크포인트를 Jetson으로 옮길 번들은 다음과 같이
 만든다. TensorRT `.engine`은 이 번들에 넣지 않으며 Jetson 본체에서 생성한다.

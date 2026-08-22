@@ -21,7 +21,11 @@ import torch
 from ultralytics import YOLO
 
 from detector import DetectorConfig, FallState
+from overlay import draw_status_overlay, gui_available
 from streaming import StreamingFallDetector
+
+
+WINDOW_TITLE = "Fall Detection - YOLO pose"
 
 
 COCO_TO_BODY25 = {
@@ -240,6 +244,13 @@ def publish_status(
 
 def main() -> int:
     args = parse_args()
+    if not args.headless and not gui_available():
+        raise SystemExit(
+            "This OpenCV build cannot open a window (GUI: NONE), which is what\n"
+            "opencv-python-headless gives you. Either run with --headless, or:\n"
+            "  python3.10 -m pip uninstall -y opencv-python-headless\n"
+            "  python3.10 -m pip install --user --no-deps opencv-python==4.11.0.86"
+        )
     if args.heartbeat_seconds < 0 or args.fall_hold_seconds < 0:
         raise ValueError("--heartbeat-seconds and --fall-hold-seconds cannot be negative")
     if not 0 < args.classifier_threshold < 1:
@@ -349,6 +360,11 @@ def main() -> int:
     inference_times: list[float] = []
     started = time.perf_counter()
     next_frame_at = started
+    if not args.headless:
+        # WINDOW_NORMAL so the view can be resized; the camera is 640x480, which
+        # is small on a desktop and unreadable on a projector.
+        cv2.namedWindow(WINDOW_TITLE, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(WINDOW_TITLE, width, height)
     try:
         while True:
             if ffmpeg_process:
@@ -486,26 +502,28 @@ def main() -> int:
 
             should_render = not args.no_render and (writer is not None or not args.headless)
             if should_render:
-                annotated = prediction.plot()
-                color = (0, 0, 255) if latched else (0, 220, 0)
-                label = "CALIBRATING" if calibrating else state.name
-                cv2.rectangle(annotated, (10, 10), (430, 64), (0, 0, 0), -1)
-                cv2.putText(
-                    annotated,
-                    f"{label}{'  [FALL]' if latched else ''}  FPS: {fps:.1f}",
-                    (20, 47),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.8,
-                    color,
-                    2,
+                annotated = draw_status_overlay(
+                    prediction.plot(),
+                    state,
+                    latched,
+                    calibrating,
+                    fps,
+                    inference_times[-1] * 1000.0,
+                    fall_probability,
                 )
                 if writer:
                     writer.write(annotated)
             if not args.headless:
-                display_frame = annotated if should_render else frame
-                cv2.imshow("YOLO Pose Fall Detection", display_frame)
-                if cv2.waitKey(1) & 0xFF in (ord("q"), ord("Q"), 27):
+                cv2.imshow(WINDOW_TITLE, annotated if should_render else frame)
+                key = cv2.waitKey(1) & 0xFF
+                if key in (ord("q"), ord("Q"), 27):
                     break
+                # Acknowledging the alarm has to be possible without a restart:
+                # the latch is deliberately sticky, so give the operator a key.
+                if key in (ord("r"), ord("R")) and detector is not None:
+                    detector.reset_alarm()
+                    state, latched = detector.state, detector.fall_latched
+                    classifier_candidate_count = 0
             processed += 1
             if args.max_frames and processed >= args.max_frames:
                 break

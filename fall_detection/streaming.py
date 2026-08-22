@@ -166,6 +166,10 @@ class StreamingFallDetector:
         self._confirm_frames = max(1, round(fps * self.config.confirmation_seconds))
         self._missing_frames = max(1, round(fps * self.config.missing_confirmation_seconds))
         self._calibration_frames = max(1, round(fps * calibration_seconds))
+        # A single dropped detection is a pose-network miss, not the person
+        # leaving. Without this the idle state flickers NORMAL/UNKNOWN frame by
+        # frame, which reaches the screen and the status file as real events.
+        self._absent_frames = max(1, round(fps * 0.5))
         self._auto_clear_frames = round(fps * auto_clear_seconds) if auto_clear_seconds > 0 else 0
         self._hold_frames = round(fps * fall_hold_seconds) if fall_hold_seconds > 0 else 0
 
@@ -186,6 +190,7 @@ class StreamingFallDetector:
         self._candidate = 0
         self._missing = 0
         self._upright = 0
+        self._absent = 0
         self._state = FallState.UNKNOWN
         self._latched = False
         self._latched_at: int | None = None
@@ -213,6 +218,7 @@ class StreamingFallDetector:
         self._candidate = 0
         self._missing = 0
         self._upright = 0
+        self._absent = 0
 
     def force_fallen(self) -> None:
         """Raise the alarm from an outside source, e.g. a learned classifier.
@@ -310,6 +316,7 @@ class StreamingFallDetector:
         """Same transitions as `detector.detect_fall`, carried across frames."""
         cfg = self.config
         index = self._index
+        self._absent = 0 if detected else self._absent + 1
         motion = speed >= cfg.min_downward_speed and drop >= cfg.min_drop
         horizontal = angle >= cfg.min_torso_angle or aspect >= cfg.min_bbox_aspect
         low = low_hip >= cfg.min_low_hip
@@ -333,7 +340,10 @@ class StreamingFallDetector:
         elif has_recent_motion and not detected:
             self._missing += 1
         elif self._state != FallState.FALLEN:
-            self._state = FallState.NORMAL if detected else FallState.UNKNOWN
+            if detected:
+                self._state = FallState.NORMAL
+            elif self._absent >= self._absent_frames:
+                self._state = FallState.UNKNOWN
             self._candidate = 0
             self._missing = 0
 

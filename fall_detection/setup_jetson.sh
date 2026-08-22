@@ -102,6 +102,19 @@ if not torch.cuda.is_available():
 cv2.cvtColor(numpy.zeros((4, 4, 3), numpy.uint8), cv2.COLOR_BGR2GRAY)
 PY
 
+step "Checking whether OpenCV can open a window"
+# opencv-python-headless is the right build for an unattended robot and the
+# wrong one for run_camera.sh, and it only says so by raising from imshow.
+if PYTHONPATH="${SCRIPT_DIR}" "${PYTHON_BIN}" -c 'from overlay import gui_available; raise SystemExit(0 if gui_available() else 1)'; then
+  echo "  window support present (run_camera.sh will work)"
+else
+  echo "  headless OpenCV: run_jetson.sh works, run_camera.sh cannot open a window."
+  echo "  To watch the live view on this desktop, swap in the GUI build:"
+  echo "    ${PYTHON_BIN} -m pip uninstall -y opencv-python-headless"
+  echo "    ${PYTHON_BIN} -m pip install --user --no-deps opencv-python==4.11.0.86"
+  echo "  --no-deps matters: without it pip pulls NumPy 2.x and breaks the OpenCV ABI."
+fi
+
 step "Preflight"
 "${PYTHON_BIN}" "${SCRIPT_DIR}/jetson_preflight.py" --json-only >/dev/null || true
 "${PYTHON_BIN}" "${SCRIPT_DIR}/jetson_preflight.py" 2>&1 >/dev/null || true
@@ -109,7 +122,8 @@ step "Preflight"
 cat <<EOF
 
 Setup finished. Next:
-  fall_detection/run_jetson.sh          run the detector on camera 0
+  fall_detection/run_camera.sh          live view in a window on this desktop
+  fall_detection/run_jetson.sh          unattended, headless, status to a file
   ${PYTHON_BIN} -m unittest discover -s fall_detection/tests
 
 A TensorRT engine is optional but is the only way to raise the frame rate on

@@ -1310,3 +1310,74 @@ GitHub HTTPS 인증 정보가 없어 완료되지 않았다. 인증 후 `git pus
    `FALL_STATUS` JSON에 `fall_latched`·`calibrating`을 추가해 soak 테스트 정보를 유지했다.
 6. **인터프리터 탐색 유지.** `run_jetson.sh`의 `PYTHON_BIN="${JETSON_PYTHON:-python3}"`는
    버리고 21절의 `find_python()`을 유지했다. 이 보드의 `python3`는 여전히 conda 3.6이다.
+
+## 26. 카메라 실시간 구동과 화면 표시
+
+작업일: 2026-08-23
+
+병합된 코드를 본체에 연결된 카메라로 처음 끝까지 돌리고, 실시간 화면 표시를 붙였다.
+
+### 확인된 환경
+
+```text
+카메라    Logitech HD Pro Webcam C920 (/dev/video0, UVC, MJPG/YUYV 640x480 30fps)
+디스플레이 X11 :0, GNOME 세션 활성 (XDG_SESSION_TYPE=x11)
+```
+
+### 발견한 차단 요인: headless OpenCV
+
+`~/.local`에 **`opencv-python-headless` 4.11.0.86**이 설치되어 있었다. 이 빌드는
+`GUI: NONE`이라 `cv2.imshow`가 아예 구현되어 있지 않고, 실행 도중 예외로만 그 사실을
+알린다. 무인 로봇에는 맞는 선택이지만 화면 확인에는 쓸 수 없다.
+
+같은 버전의 GUI 빌드(Qt5)로 교체했다. `--no-deps`가 핵심이다. 빼면 NumPy 2.x가 딸려
+들어와 OpenCV ABI가 깨진다.
+
+```bash
+/usr/bin/python3.10 -m pip uninstall -y opencv-python-headless
+/usr/bin/python3.10 -m pip install --user --no-deps opencv-python==4.11.0.86
+```
+
+교체 후에도 `numpy 1.26.4`, `torch 2.5.0a0+nv24.08 cuda_available=True`,
+`ultralytics 8.4.126`은 그대로다. 같은 실수를 반복하지 않도록 `overlay.gui_available()`이
+빌드 정보를 읽어 판정하고, 두 실행기와 `setup_jetson.sh`가 시작 시점에 이를 확인해
+교체 명령을 안내한다.
+
+### 정리한 구조
+
+```text
+jetson_env.sh    인터프리터·모델·GRU 체크포인트 탐색 (두 실행기가 source)
+run_camera.sh    데스크톱 창에 띄우는 실시간 화면
+run_jetson.sh    무인 운용, 헤드리스, 상태 파일 발행
+overlay.py       상태 색과 화면 표시 (yolo_pose.py와 live_detect.py가 공유)
+```
+
+`run_jetson.sh`에 있던 60여 줄의 환경 탐색이 `jetson_env.sh` 하나로 모였고,
+`live_detect.py`에 중복돼 있던 `STATE_COLORS`가 사라졌다. GRU 임계값 `0.475`는 앙상블
+기준으로 튜닝된 값이므로 체크포인트 두 개가 모두 있을 때만 전달하도록 고쳤다. 하나만
+있으면 조용히 다른 임계값으로 돌던 문제다.
+
+### 고친 표시 문제
+
+사람이 한 프레임 검출되지 않을 때마다 상태가 `NORMAL`↔`UNKNOWN`으로 튀었다. 포즈 네트워크의
+한 프레임 실패이지 사람이 나간 것이 아니므로, 0.5초 연속으로 검출되지 않아야 `UNKNOWN`으로
+내려가도록 debounce를 넣었다. 200프레임 구동에서 상태 발행이 수십 회에서 1회로 줄었다.
+
+### 측정 (C920, 640x480, 창 표시 + 골격 렌더링 포함)
+
+```text
+처리 속도       20~23 FPS
+추론 median     32.0 ms   p95 38.5 ms
+워밍업          약 2.3 s
+```
+
+헤드리스(`run_jetson.sh`)보다 낮은 것은 `prediction.plot()` 골격 그리기와 창 갱신 비용이다.
+실제 낙상 동작을 카메라 앞에서 수행해 `FALLING` → `FALLEN` 전이와 latch, 그리고 다시
+일어섰을 때 `--auto-clear-seconds 5`에 의한 자동 해제까지 확인했다.
+
+### 남은 것
+
+1. GRU 체크포인트가 이 보드에 없다. `make_jetson_bundle.sh`로 PC에서 옮겨야 앙상블이 켜진다.
+   현재 카메라 판정은 규칙 계층 단독이다.
+2. TensorRT 미설치. `.pt` 폴백이라 추론이 32 ms에 묶여 있다.
+3. 10분 이상 연속 구동, `tegrastats` 동시 기록, 거리별 오탐·미탐은 아직 측정하지 않았다.

@@ -16,6 +16,7 @@ from features import extract_features  # noqa: E402
 from openpose_runtime import find_openpose  # noqa: E402
 from process_video import select_person  # noqa: E402
 from evaluate import finite_max  # noqa: E402
+from overlay import STATE_COLORS, draw_status_overlay, gui_available, state_color  # noqa: E402
 from streaming import StreamingFallDetector  # noqa: E402
 from train_gmdcsa24 import resample  # noqa: E402
 from yolo_pose import coco_to_body25, resolve_device  # noqa: E402
@@ -256,10 +257,51 @@ class StreamingDetectorTests(unittest.TestCase):
         self.assertTrue(detector.fall_latched)
         self.assertEqual(detector.update(standing).state, FallState.FALLEN)
 
+    def test_a_single_dropped_detection_does_not_flip_the_state(self) -> None:
+        """A one-frame pose miss is a network hiccup, not the person leaving."""
+        detector = StreamingFallDetector(fps=10.0, frame_height=480)
+        standing = falling_frame(0, fall_start=10_000, fall_frames=10)
+        for _ in range(40):
+            detector.update(standing)
+        self.assertEqual(detector.state, FallState.NORMAL)
+
+        empty = np.full((25, 3), np.nan, dtype=np.float32)
+        empty[:, 2] = 0.0
+        self.assertEqual(detector.update(empty).state, FallState.NORMAL)
+
+        for _ in range(10):  # a full second with nobody in frame
+            detector.update(empty)
+        self.assertEqual(detector.state, FallState.UNKNOWN)
+
     def test_rejects_a_batch_instead_of_a_single_frame(self) -> None:
         detector = StreamingFallDetector(fps=10.0, frame_height=480)
         with self.assertRaisesRegex(ValueError, r"\(25, 3\)"):
             detector.update(np.zeros((5, 25, 3), dtype=np.float32))
+
+
+class OverlayTests(unittest.TestCase):
+    def test_every_state_has_a_colour(self) -> None:
+        for state in FallState:
+            self.assertIn(state, STATE_COLORS)
+
+    def test_a_latched_alarm_stays_red_whatever_the_state_reads(self) -> None:
+        """The border and the text must not disagree during auto-clear."""
+        self.assertEqual(
+            state_color(FallState.NORMAL, latched=True), STATE_COLORS[FallState.FALLEN]
+        )
+
+    def test_overlay_keeps_the_frame_shape_and_marks_a_fall(self) -> None:
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        calm = draw_status_overlay(frame.copy(), FallState.NORMAL, False, False, 15.0, 33.0)
+        alarm = draw_status_overlay(frame.copy(), FallState.FALLEN, True, False, 15.0, 33.0)
+
+        self.assertEqual(calm.shape, frame.shape)
+        # The border only goes on when latched, so the corner separates them.
+        self.assertEqual(tuple(int(v) for v in alarm[0, 0]), STATE_COLORS[FallState.FALLEN])
+        self.assertNotEqual(tuple(int(v) for v in calm[0, 0]), STATE_COLORS[FallState.FALLEN])
+
+    def test_gui_availability_is_reported_without_opening_a_window(self) -> None:
+        self.assertIsInstance(gui_available(), bool)
 
 
 if __name__ == "__main__":

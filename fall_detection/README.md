@@ -58,6 +58,7 @@ V4L2 카메라
 | `detector.py` | 상태 머신과 임곗값 정의 | 공통 |
 | `streaming.py` | 프레임당 O(1) 실시간 검출기 | 공통 (주로 Jetson) |
 | `yolo_pose.py` | YOLO pose 실행기 (영상 파일 / 카메라) | 공통 |
+| `status_publisher.py` | 표준 출력 및 atomic JSON 상태 발행 | 공통 (주로 Jetson) |
 
 `features.py`와 `detector.py`의 수식·임곗값은 두 경로가 공유한다. PC에서 녹화 영상으로
 맞춘 임곗값이 Jetson 실시간에서도 같은 의미를 갖는다.
@@ -631,6 +632,71 @@ outputs/live_fall_status.json
 
 `FALLEN` 해제 정책은 두 가지이며 함께 쓸 수 있다. 둘 다 `streaming.py`의 latch가
 소유하므로, 화면·상태 파일·표준 출력이 서로 다른 상태를 보고하는 일은 없다.
+
+상태 생성과 파일 입출력은 `status_publisher.py`에 분리되어 있다. `yolo_pose.py`는
+카메라·추론·상태 전이의 실행 흐름만 담당하고, 발행기는 아래 schema 1 payload를 만든다.
+
+```json
+{
+  "schema": 1,
+  "timestamp": 1787420563.24,
+  "state": "FALLEN",
+  "fall_detected": true,
+  "fall_latched": true,
+  "calibrating": false,
+  "frame": 127,
+  "fps": 15.0,
+  "inference_ms": 32.1,
+  "reason": "state_change",
+  "fall_probability": null
+}
+```
+
+필드 의미:
+
+- `state`: 현재 상태 머신 상태. `NORMAL`, `FALLING`, `FALL_CANDIDATE`, `FALLEN`,
+  `UNKNOWN` 중 하나다.
+- `fall_latched`: 한 번 확정된 경보가 아직 해제되지 않았는지 나타낸다.
+- `fall_detected`: 현재 상태가 `FALLEN`이거나 latch가 유지 중이면 참이다. 따라서 내부 상태가
+  일시적으로 달라져도 소비자가 살아 있는 경보를 놓치지 않는다.
+- `calibrating`: 초기 신체 높이와 골반 위치를 측정 중이라 판정을 보류하는 상태다.
+- `reason`: 상태 변화 발행은 `state_change`, 정기 발행은 `heartbeat`다.
+- `fall_probability`: GRU 분류기를 사용하지 않으면 `null`, 사용하면 0~1 확률이다.
+
+상태 파일은 같은 디렉터리의 `.tmp` 파일에 완성된 JSON을 쓴 다음 `replace()`한다. ROS 노드나
+감시 프로세스가 쓰는 도중의 불완전한 JSON을 읽는 일을 피하기 위한 atomic 갱신이다.
+
+### 설정값 검증
+
+잘못된 값이 상태 머신 내부에서 조용히 이상 동작하지 않도록 생성 시점에 중단한다.
+
+- `DetectorConfig`의 모든 특징 임곗값과 확인 시간은 유한한 양수여야 한다.
+- 스트리밍 `fps`와 `frame_height`는 양수여야 한다.
+- 관절 confidence 임곗값은 0~1 범위여야 한다.
+- calibration, 자동 해제, hold 시간은 유한한 0 이상의 값이어야 한다.
+
+CLI에서 임곗값을 조정할 때 0으로 기능을 끄는 방식은 지원하지 않는다. 경보 해제 기능처럼
+0이 명시적으로 허용된 옵션은 `--auto-clear-seconds`, `--fall-hold-seconds`이며 각각
+자동 해제 비활성화와 시간 기반 해제 비활성화를 뜻한다.
+
+### 코드 회귀 테스트
+
+카메라나 OpenPose 없이 Python 3.10 환경에서 실행한다.
+
+```bash
+/usr/bin/python3 -m compileall -q fall_detection exaone_finetuning
+/usr/bin/python3 -m unittest discover -s fall_detection/tests -v
+git diff --check
+```
+
+2026-08-23 기준 32개 테스트가 통과한다. 합성 낙상 전이, 장시간 latch 유지, 수동·시간 기반
+해제, 초기 calibration, 고정 크기 히스토리, 한 프레임 검출 실패 debounce, COCO→BODY_25
+변환, OpenPose 탐색, overlay, 잘못된 설정 거부, 상태 JSON과 atomic 파일 교체를 포함한다.
+
+Jetson에서 단순히 `python3`를 실행하면 `~/jetconda3/bin/python3` 3.6이 먼저 선택될 수 있다.
+이 코드는 Python 3.10 이상을 기준으로 하므로 테스트는 `/usr/bin/python3` 또는
+`/usr/bin/python3.10`으로 실행하고, 실제 구동은 인터프리터를 탐색하는 `run_camera.sh`와
+`run_jetson.sh`를 사용한다.
 
 - `--fall-hold-seconds`: 마지막 확정 프레임에서 이 시간이 지나면 해제한다. `0`이면
   재시작하거나 `R` 키로 확인할 때까지 유지한다. 쓰러진 사람이 움직이지 않아도 시간이

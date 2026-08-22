@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import subprocess
 import tempfile
@@ -22,6 +21,7 @@ from ultralytics import YOLO
 
 from detector import DetectorConfig, FallState
 from overlay import draw_status_overlay, gui_available
+from status_publisher import publish_status
 from streaming import StreamingFallDetector
 
 
@@ -207,39 +207,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--classifier-confirm-seconds", type=float, default=0.5)
     parser.add_argument("--classifier-interval", type=int, default=3, help="Run GRU every N pose frames")
     return parser.parse_args()
-
-
-def publish_status(
-    path: Path | None,
-    state: FallState,
-    frame: int,
-    fps: float,
-    inference_ms: float,
-    reason: str,
-    fall_probability: float | None = None,
-    latched: bool = False,
-    calibrating: bool = False,
-) -> None:
-    payload = {
-        "schema": 1,
-        "timestamp": time.time(),
-        "state": state.name,
-        "fall_detected": state == FallState.FALLEN,
-        "fall_latched": latched,
-        "calibrating": calibrating,
-        "frame": frame,
-        "fps": round(fps, 3),
-        "inference_ms": round(inference_ms, 3),
-        "reason": reason,
-        "fall_probability": round(fall_probability, 4) if fall_probability is not None else None,
-    }
-    print("FALL_STATUS " + json.dumps(payload, separators=(",", ":")), flush=True)
-    if path is None:
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(path)
 
 
 def main() -> int:

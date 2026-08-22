@@ -12,12 +12,14 @@ MODULE_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MODULE_DIR))
 
 from detector import FallState, detect_fall  # noqa: E402
+from detector import DetectorConfig  # noqa: E402
 from features import extract_features  # noqa: E402
 from openpose_runtime import find_openpose  # noqa: E402
 from process_video import select_person  # noqa: E402
 from evaluate import finite_max  # noqa: E402
 from overlay import STATE_COLORS, draw_status_overlay, gui_available, state_color  # noqa: E402
 from streaming import StreamingFallDetector  # noqa: E402
+from status_publisher import build_status_payload, publish_status  # noqa: E402
 from train_gmdcsa24 import resample  # noqa: E402
 from yolo_pose import coco_to_body25, resolve_device  # noqa: E402
 
@@ -166,6 +168,18 @@ class EvaluationTests(unittest.TestCase):
 
 
 class StreamingDetectorTests(unittest.TestCase):
+    def test_rejects_invalid_runtime_configuration(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Frame height"):
+            StreamingFallDetector(fps=10.0, frame_height=0)
+        with self.assertRaisesRegex(ValueError, "Confidence threshold"):
+            StreamingFallDetector(
+                fps=10.0, frame_height=480, confidence_threshold=1.1
+            )
+        with self.assertRaisesRegex(ValueError, "calibration_seconds"):
+            StreamingFallDetector(
+                fps=10.0, frame_height=480, calibration_seconds=-1.0
+            )
+
     def test_synthetic_fall_reaches_fallen_state(self) -> None:
         detector = StreamingFallDetector(fps=10.0, frame_height=480)
         for index in range(60):
@@ -302,6 +316,46 @@ class OverlayTests(unittest.TestCase):
 
     def test_gui_availability_is_reported_without_opening_a_window(self) -> None:
         self.assertIsInstance(gui_available(), bool)
+
+
+class ConfigurationTests(unittest.TestCase):
+    def test_detector_rejects_nonpositive_thresholds(self) -> None:
+        with self.assertRaisesRegex(ValueError, "min_drop"):
+            DetectorConfig(min_drop=0.0)
+
+
+class StatusPublisherTests(unittest.TestCase):
+    def test_latched_alarm_is_reported_as_a_fall(self) -> None:
+        payload = build_status_payload(
+            FallState.NORMAL,
+            frame=12,
+            fps=14.9999,
+            inference_ms=31.2349,
+            reason="heartbeat",
+            latched=True,
+            timestamp=123.0,
+        )
+
+        self.assertTrue(payload["fall_detected"])
+        self.assertEqual(payload["timestamp"], 123.0)
+        self.assertEqual(payload["fps"], 15.0)
+
+    def test_status_file_is_replaced_without_leaving_a_temporary_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "nested" / "status.json"
+            publish_status(
+                path,
+                FallState.FALLEN,
+                frame=7,
+                fps=10.0,
+                inference_ms=20.0,
+                reason="state_change",
+                latched=True,
+            )
+
+            self.assertTrue(path.is_file())
+            self.assertFalse(path.with_name("status.json.tmp").exists())
+            self.assertIn('"state": "FALLEN"', path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

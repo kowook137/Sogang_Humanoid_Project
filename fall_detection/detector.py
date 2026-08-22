@@ -29,6 +29,11 @@ class DetectorConfig:
     confirmation_seconds: float = 0.5
     missing_confirmation_seconds: float = 0.5
 
+    def __post_init__(self) -> None:
+        for name, value in vars(self).items():
+            if not np.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be a finite positive number, got {value}")
+
 
 @dataclass(frozen=True)
 class DetectionResult:

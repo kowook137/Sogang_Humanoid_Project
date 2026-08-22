@@ -1444,3 +1444,79 @@ taehun/sim2sim-sim2real   보행 쪽 별도 브랜치, 이번 작업과 무관 (
    측정한다. 26절의 측정은 코드 경로 확인 수준이지 정확도 평가가 아니다.
 4. ROS 2 publisher. rclpy는 정상이므로 보행 노드의 토픽 이름과 메시지 형식만 정해지면 된다.
    `outputs/live_fall_status.json`의 스키마를 그대로 메시지로 옮기면 된다.
+
+## 28. 실시간 코드 책임 분리와 설정 검증
+
+작업일: 2026-08-23
+
+실제 데이터로 임곗값을 다시 조정하기 전에, 판정 결과를 외부 시스템에 안정적으로 전달하고
+잘못된 실행 옵션을 조기에 발견할 수 있도록 실시간 코드의 경계를 정리했다. 특징 수식,
+`DetectorConfig` 기본 임곗값, 상태 전이와 GRU 결합 조건은 변경하지 않았다.
+
+### 상태 발행기 분리
+
+기존 `yolo_pose.py`에는 카메라 입력, YOLO 추론, 스트리밍 판정, GRU 앙상블, 화면 표시와
+JSON 생성·파일 쓰기까지 모여 있었다. 이 가운데 외부 인터페이스인 상태 payload 생성과
+입출력을 `status_publisher.py`로 옮겼다.
+
+```text
+yolo_pose.py
+  -> StreamingFallDetector 상태 결정
+  -> status_publisher.build_status_payload()
+  -> 표준 출력 FALL_STATUS JSON Lines
+  -> outputs/live_fall_status.json atomic replace
+```
+
+`build_status_payload()`는 I/O 없이 dict를 반환하고 timestamp도 주입할 수 있어 스키마를
+결정적으로 단위 테스트할 수 있다. `publish_status()`는 기존과 동일하게 표준 출력에 한 줄을
+쓰고, 파일 경로가 있으면 부모 디렉터리를 만든 뒤 `.tmp`를 최종 파일로 교체한다.
+
+### latch와 `fall_detected` 의미 수정
+
+이전 payload는 `fall_detected = (state == FALLEN)`으로만 계산했다. 그러나 실시간 화면의
+붉은 경보 기준은 `fall_latched`이며 latch가 외부 소비자에게도 실제 경보의 source of truth다.
+두 값이 다른 순간에는 화면은 경보인데 JSON의 `fall_detected`는 거짓이 될 여지가 있었다.
+
+이제 다음 조건으로 통일했다.
+
+```text
+fall_detected = (state == FALLEN) OR fall_latched
+```
+
+따라서 명시적인 `reset_alarm()`, 자세 기반 자동 해제 또는 시간 기반 hold 만료 전까지
+JSON 소비자가 낙상 경보를 놓치지 않는다. schema 번호는 1로 유지했으며 필드 추가나 제거는
+없다. 기존 소비자는 그대로 읽을 수 있다.
+
+### 잘못된 설정 조기 차단
+
+`DetectorConfig.__post_init__()`에서 모든 판정 임곗값과 확인 시간이 유한한 양수인지
+검증한다. `StreamingFallDetector` 생성자에서는 다음을 검증한다.
+
+- FPS와 frame height: 양수
+- confidence threshold: 0~1
+- calibration, auto-clear, fall-hold 시간: 유한한 0 이상 값
+
+기존에는 음수 시간이 `round()`와 `max()`를 거쳐 사실상 다른 값으로 바뀌거나, 0 임곗값이
+score 계산의 0 나눗셈으로 이어질 수 있었다. 이제 실행 시작 시 옵션 이름과 잘못된 값을
+포함한 `ValueError`로 중단한다.
+
+### 검증 결과
+
+Jetson의 기본 PATH에는 Python 3.6이 먼저 있으므로 `/usr/bin/python3` 3.10.12를 명시했다.
+
+```text
+/usr/bin/python3 -m compileall -q fall_detection exaone_finetuning  성공
+/usr/bin/python3 -m unittest discover -s fall_detection/tests -v  32개 통과
+git diff --check                                                   통과
+```
+
+기존 28개 테스트에 다음 4개 영역을 추가했다.
+
+1. 0 이하의 detector threshold 거부
+2. 잘못된 frame height, confidence, calibration 시간 거부
+3. `NORMAL + latched`에서도 `fall_detected=true` 유지
+4. 중첩 출력 디렉터리 생성, JSON 기록과 임시 파일 정리
+
+실제 카메라·GPU 종단 성능은 판정식과 추론 경로를 바꾸지 않았으므로 이번 작업에서 다시
+측정하지 않았다. 다음 정확도 작업은 현재 임곗값을 고정한 채 독립 참가자 영상의 시간당
+오경보와 낙상 재현율을 먼저 측정한다.

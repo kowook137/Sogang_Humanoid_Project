@@ -153,6 +153,20 @@ class StreamingFallDetector:
     ) -> None:
         if fps <= 0:
             raise ValueError(f"FPS must be positive, got {fps}")
+        if frame_height <= 0:
+            raise ValueError(f"Frame height must be positive, got {frame_height}")
+        if not 0.0 <= confidence_threshold <= 1.0:
+            raise ValueError(
+                "Confidence threshold must be between 0 and 1, "
+                f"got {confidence_threshold}"
+            )
+        for name, value in (
+            ("calibration_seconds", calibration_seconds),
+            ("auto_clear_seconds", auto_clear_seconds),
+            ("fall_hold_seconds", fall_hold_seconds),
+        ):
+            if not np.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and non-negative, got {value}")
         self.fps = float(fps)
         self.frame_height = int(frame_height)
         self.config = config or DetectorConfig()

@@ -1381,3 +1381,66 @@ overlay.py       상태 색과 화면 표시 (yolo_pose.py와 live_detect.py가 
    현재 카메라 판정은 규칙 계층 단독이다.
 2. TensorRT 미설치. `.pt` 폴백이라 추론이 32 ms에 묶여 있다.
 3. 10분 이상 연속 구동, `tegrastats` 동시 기록, 거리별 오탐·미탐은 아직 측정하지 않았다.
+
+## 27. Git 반영과 푸시 인증 정리
+
+작업일: 2026-08-23
+
+25~26절의 결과를 원격에 반영하는 과정에서 인증 문제를 하나 해결했다.
+
+### 막힌 지점: 저장된 자격증명이 다른 계정
+
+```text
+remote: Permission to kowook137/Sogang_Humanoid_Project.git denied to Jung-Haechan.
+fatal: ... The requested URL returned error: 403
+```
+
+이 보드의 `~/.git-credentials`(helper=`store`)에 저장된 GitHub 계정이 `Jung-Haechan`이었고,
+이 계정에는 저장소 쓰기 권한이 없다. 커밋 작성자(`hyeonseo <hyeonseobin83-lang@...>`)는
+정상이었다. **커밋 author 와 푸시 자격증명은 별개**라는 점이 원인을 헷갈리게 만든다.
+
+HTTPS + Personal Access Token 경로는 토큰을 대화형으로 입력해야 하는데, 이 작업 세션의
+셸은 프롬프트 입력을 전달하지 못해 2분 후 타임아웃됐다. 토큰을 명령줄이나 로그에 남기는
+방식은 택하지 않았다.
+
+### 해결: SSH 키
+
+```bash
+ssh-keygen -t ed25519 -N "" -C "jetson-orin-nano-$(hostname)" -f ~/.ssh/id_ed25519
+cat ~/.ssh/id_ed25519.pub          # GitHub > Settings > SSH and GPG keys 에 등록
+ssh -T git@github.com              # Hi hyeonseobin83-lang! ... 확인
+git remote set-url origin git@github.com:kowook137/Sogang_Humanoid_Project.git
+```
+
+암호구절은 넣지 않았다. 넣으면 푸시마다 대화형 입력을 요구해 원래 막혔던 문제가 그대로
+반복된다. 개인키는 이 보드 밖으로 나가지 않으며, `~/.git-credentials`의 기존 항목은
+지우지 않았다(SSH를 쓰므로 더 이상 사용되지 않는다).
+
+### 반영한 커밋
+
+```text
+daa5674  feat: run fall detection on Jetson Orin Nano with an O(1) streaming detector
+90aed11  Merge origin/main: GRU ensemble and status publishing onto the streaming detector
+28b84aa  feat: run live fall detection on the attached camera with an on-screen view
+```
+
+`hyeonseo/jetson-realtime` 브랜치로 푸시한 뒤 `main`에 fast-forward로 반영했다. 24절에서
+"푸시 미완"으로 남겼던 상태는 이것으로 정리됐다.
+
+### 현재 저장소 상태
+
+```text
+main                      25~27절 포함, PC 작업(22~24절)과 Jetson 작업(21,26절) 모두 반영
+taehun/sim2sim-sim2real   보행 쪽 별도 브랜치, 이번 작업과 무관 (PR #1)
+```
+
+### 이 보드에서 다음에 할 일
+
+1. `make_jetson_bundle.sh`로 PC의 GRU 체크포인트 2개를 옮긴다. 현재 카메라 판정은
+   규칙 계층 단독이고, `run_camera.sh`/`run_jetson.sh`가 자동으로 앙상블을 켠다.
+2. `sudo apt install tensorrt` 후 FP16 엔진을 이 보드에서 생성한다. 현재 추론 32 ms는
+   `.pt` 폴백 값이다.
+3. 10분 이상 연속 구동을 `tegrastats`와 함께 기록하고, 거리·조도·자세별 오탐과 미탐을
+   측정한다. 26절의 측정은 코드 경로 확인 수준이지 정확도 평가가 아니다.
+4. ROS 2 publisher. rclpy는 정상이므로 보행 노드의 토픽 이름과 메시지 형식만 정해지면 된다.
+   `outputs/live_fall_status.json`의 스키마를 그대로 메시지로 옮기면 된다.

@@ -21,6 +21,10 @@ SYSTEM_PROMPT = (MODULE_DIR / "prompts" / "gyeongsang.txt").read_text(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-id", default=DEFAULT_MODEL_ID)
+    parser.add_argument(
+        "--revision",
+        help="Pinned Hugging Face model revision (commit hash, tag, or branch)",
+    )
     parser.add_argument("--questions", type=Path, default=DEFAULT_QUESTIONS)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument(
@@ -55,15 +59,16 @@ def load_questions(path: Path) -> list[dict]:
     return records
 
 
-def generate_variant(model_id, adapter, questions, max_new_tokens):
+def generate_variant(model_id, revision, adapter, questions, max_new_tokens):
     import torch
     from peft import PeftModel
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    tokenizer = AutoTokenizer.from_pretrained(model_id, revision=revision)
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
-        dtype=torch.bfloat16,
+        revision=revision,
+        torch_dtype=torch.bfloat16,
         device_map="auto",
         trust_remote_code=True,
     )
@@ -133,7 +138,7 @@ def main() -> int:
     for label, adapter in variants:
         print(f"Generating: {label}")
         responses = generate_variant(
-            args.model_id, adapter, questions, args.max_new_tokens
+            args.model_id, args.revision, adapter, questions, args.max_new_tokens
         )
         for question, response in zip(questions, responses, strict=True):
             results[question["id"]]["responses"][label] = response

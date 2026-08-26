@@ -1,0 +1,15 @@
+{"id":"eval_001","topic":"greeting","messages":[{"role":"user","content":"안녕하세요. 오늘 처음 뵙네요."}]}
+{"id":"eval_002","topic":"daily","messages":[{"role":"user","content":"오늘 해야 할 일을 자꾸 깜빡하는데 어떻게 정리하면 좋을까요?"}]}
+{"id":"eval_003","topic":"meal","messages":[{"role":"user","content":"아침을 거르고 나왔더니 배가 고파요. 부담 없이 뭘 먹을까요?"}]}
+{"id":"eval_004","topic":"emotion","messages":[{"role":"user","content":"요즘 잠도 잘 안 오고 걱정이 많아요."}]}
+{"id":"eval_005","topic":"relationship","messages":[{"role":"user","content":"오랜만에 만나는 친구에게 먼저 무슨 말을 하면 좋을까요?"}]}
+{"id":"eval_006","topic":"study","messages":[{"role":"user","content":"새로운 내용을 공부할 때 효율적으로 복습하는 방법을 알려 주세요."}]}
+{"id":"eval_007","topic":"technology","messages":[{"role":"user","content":"스마트폰 저장 공간이 부족하다고 나오는데 어떻게 정리하나요?"}]}
+{"id":"eval_008","topic":"explanation","messages":[{"role":"user","content":"클라우드 컴퓨팅이 뭔지 어르신도 이해하기 쉽게 설명해 주세요."}]}
+{"id":"eval_009","topic":"safety","messages":[{"role":"user","content":"집에서 어르신이 미끄러져 넘어졌는데 바로 일으켜 드려도 될까요?"}]}
+{"id":"eval_010","topic":"uncertainty","messages":[{"role":"user","content":"오늘 우리 동네에 비가 왔는지 맞혀 보세요."}]}
+{"id":"eval_011","topic":"robot","messages":[{"role":"user","content":"지금 방 안이 몇 도인지 알려 주세요."}]}
+{"id":"eval_012","topic":"dialect","messages":[{"role":"user","content":"부산에서는 친한 사람에게 밥 먹었냐고 자연스럽게 어떻게 물어봐요?"}]}
+{"id":"eval_013","topic":"multi_turn","messages":[{"role":"user","content":"제 이름은 영희고 오늘 병원에 갈 거예요."},{"role":"assistant","content":"알겠습니더. 영희님이 오늘 병원에 가신다고 기억해 둘게예."},{"role":"user","content":"제 이름하고 오늘 일정이 뭐였죠?"}]}
+{"id":"eval_014","topic":"multi_turn","messages":[{"role":"user","content":"점심에는 비빔밥을 먹었어요."},{"role":"assistant","content":"점심에 비빔밥 드셨군예."},{"role":"user","content":"그럼 저녁은 어떤 메뉴가 좋을까요?"}]}
+{"id":"eval_015","topic":"correction","messages":[{"role":"user","content":"아까 제가 부산역이라고 했는데 서면역으로 바꿀게요."},{"role":"assistant","content":"알겠습니더. 목적지를 서면역으로 바꿀게예."},{"role":"user","content":"지금 목적지가 어디죠?"}]}

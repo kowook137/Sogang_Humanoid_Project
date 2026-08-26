@@ -1,4 +1,5 @@
 import argparse
+import inspect
 from pathlib import Path
 
 MODULE_DIR = Path(__file__).resolve().parent
@@ -6,8 +7,9 @@ DEFAULT_DATA_DIR = MODULE_DIR / "data" / "processed" / "gyeongsang" / "lora_v2"
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="EXAONE 4.0 Gyeongsang QLoRA training")
+    parser = argparse.ArgumentParser(description="EXAONE Gyeongsang QLoRA training")
     parser.add_argument("--model-id", default="LGAI-EXAONE/EXAONE-4.0-1.2B")
+    parser.add_argument("--revision", default=None)
     parser.add_argument("--train-file", type=Path, default=DEFAULT_DATA_DIR / "train.jsonl")
     parser.add_argument(
         "--validation-file",
@@ -21,6 +23,9 @@ def parse_args():
     )
     parser.add_argument("--epochs", type=float, default=1.0)
     parser.add_argument("--learning-rate", type=float, default=3e-5)
+    parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
+    parser.add_argument("--max-length", type=int, default=2048)
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
@@ -83,12 +88,13 @@ def load_sft_dataset(path):
 
 
 def main():
+    args = parse_args()
+
     import torch
     from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
     from trl import SFTConfig, SFTTrainer
 
-    args = parse_args()
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA GPU를 찾지 못했습니다. QLoRA 학습은 GPU VM에서 실행하세요.")
 
@@ -102,15 +108,19 @@ def main():
         bnb_4bit_compute_dtype=torch.bfloat16,
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_id)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model_id,
+        revision=args.revision,
+    )
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
 
     model = AutoModelForCausalLM.from_pretrained(
         args.model_id,
+        revision=args.revision,
         quantization_config=bnb_config,
         device_map="auto",
-        dtype=torch.bfloat16,
+        torch_dtype=torch.bfloat16,
         trust_remote_code=True,
     )
     model.config.use_cache = False
@@ -128,28 +138,42 @@ def main():
     )
     model.print_trainable_parameters()
 
+    config_values = {
+        "output_dir": str(args.output_dir),
+        "per_device_train_batch_size": args.batch_size,
+        "per_device_eval_batch_size": args.batch_size,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "learning_rate": args.learning_rate,
+        "warmup_ratio": 0.05,
+        "bf16": True,
+        "logging_steps": 10,
+        "num_train_epochs": args.epochs,
+        "eval_strategy": "epoch",
+        "save_strategy": "epoch",
+        "save_total_limit": 2,
+        "load_best_model_at_end": True,
+        "metric_for_best_model": "eval_loss",
+        "greater_is_better": False,
+        "completion_only_loss": True,
+        "optim": "paged_adamw_8bit",
+        "max_length": args.max_length,
+        "gradient_checkpointing": True,
+        "gradient_checkpointing_kwargs": {"use_reentrant": False},
+        "seed": args.seed,
+        "data_seed": args.seed,
+        "report_to": "none",
+    }
+    supported_config = inspect.signature(SFTConfig).parameters
+    if "completion_only_loss" not in supported_config:
+        raise RuntimeError(
+            "설치된 TRL은 completion_only_loss를 지원하지 않습니다. "
+            "TRL을 업데이트한 뒤 다시 실행하세요."
+        )
+    unsupported = sorted(set(config_values) - set(supported_config))
+    if unsupported:
+        print(f"Ignoring unsupported SFTConfig options: {', '.join(unsupported)}")
     training_args = SFTConfig(
-        output_dir=str(args.output_dir),
-        per_device_train_batch_size=2,
-        per_device_eval_batch_size=2,
-        gradient_accumulation_steps=8,
-        learning_rate=args.learning_rate,
-        warmup_ratio=0.05,
-        bf16=True,
-        logging_steps=10,
-        num_train_epochs=args.epochs,
-        eval_strategy="epoch",
-        save_strategy="epoch",
-        save_total_limit=2,
-        load_best_model_at_end=True,
-        metric_for_best_model="eval_loss",
-        greater_is_better=False,
-        completion_only_loss=True,
-        optim="paged_adamw_8bit",
-        max_length=2048,
-        seed=args.seed,
-        data_seed=args.seed,
-        report_to="none",
+        **{key: value for key, value in config_values.items() if key in supported_config}
     )
 
     trainer = SFTTrainer(

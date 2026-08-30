@@ -5,20 +5,22 @@ from __future__ import annotations
 import argparse
 import json
 import re
+from difflib import SequenceMatcher
 from pathlib import Path
 
 MODEL = "LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct"
 REVISION = "0ff6b5ec7c13b049b253a16a889aa269e6b79a94"
 POLITE = re.compile(r"(?:요|예|입니더|습니더|하이소|보이소|주이소)[.!?~]*$")
 DIALECT = re.compile(
-    r"(?:마이|몬|우째|묵|이케|그라모|아이가|데이|나예|입니더|습니더|"
-    r"하이소|보이소|주이소|(?:노|나)(?=[.!?~]*$))"
+    r"(?:마이|몬|우째|묵|이케|그라모|아이가|데이|나예|네예|제예|지예|"
+    r"인가예|는가예|입니더|습니더|하이소|보이소|주이소|"
+    r"(?:노|나)(?=[.!?~]*$))"
 )
 NUMBER = re.compile(r"\d+(?:[.,]\d+)*")
 LATIN = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
 SYSTEM = """실제 부산 사투리 문장을 어르신께 말하는 현대 부산·경남 존댓말로 바꾸세요.
-뜻, 사실, 숫자, 고유명사와 부산 사투리 어휘·문장 구조는 그대로 유지하세요.
-표준어로 되돌리지 말고 반말만 자연스러운 존댓말로 바꾸세요. 정보를 추가하거나
+뜻, 사실, 숫자, 고유명사, 주어와 부산 사투리 어휘·문장 구조는 그대로 유지하세요.
+단어나 내용을 다시 쓰지 말고 반말 종결어미만 자연스러운 존댓말로 바꾸세요. 정보를 추가하거나
 삭제하지 마세요. 과장된 방송식 표현을 쓰지 말고 변환된 한 문장만 출력하세요.
 
 입력: 니 오늘 밥 묵었나?
@@ -52,6 +54,8 @@ def reject_reason(source, target):
     if LATIN.findall(source) != LATIN.findall(target): return "latin_token_changed"
     ratio = len(re.sub(r"\s+", "", target)) / max(1, len(re.sub(r"\s+", "", source)))
     if not .65 <= ratio <= 1.35: return "length_changed"
+    if SequenceMatcher(None, re.sub(r"\s+", "", source), re.sub(r"\s+", "", target)).ratio() < .55:
+        return "meaning_drift"
     return None
 
 
@@ -63,6 +67,11 @@ def load_candidates(path):
         if record.get("register") != "non_polite" or record.get("strength") != "strong":
             continue
         source = record["messages"][2]["content"]
+        # First/second-person spoken utterances are prone to role reversal when
+        # converted to elder-directed speech. Neutral sentences still leave over
+        # 2,900 strong real-speaker candidates, enough for the v6 target.
+        if re.search(r"(?:^|\s)(?:내가|나는|난|내는|우리|내|니가|니는|너가|너는|넌|니)(?:\s|[,.!?]|$)", source):
+            continue
         if source in seen: continue
         seen.add(source)
         candidates.append({"id": record["id"], "dialect_non_polite": source})

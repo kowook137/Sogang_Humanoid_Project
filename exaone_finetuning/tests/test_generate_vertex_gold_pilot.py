@@ -21,6 +21,17 @@ class VertexGoldPilotTests(unittest.TestCase):
         self.assertIn("candidate_1_dialect_not_detected", errors)
         self.assertIn("candidate_2_number_changed", errors)
 
+    def test_accepts_observed_modern_endings(self):
+        errors = validate_candidates(
+            "간단한 음식이 좋겠습니다.",
+            [
+                "간단한 음식이 좋겠심더.",
+                "간단한 음식이면 괜찮을낍니더.",
+                "간단한 음식은 어떻겠능교?",
+            ],
+        )
+        self.assertEqual(errors, [])
+
 
 if __name__ == "__main__":
     unittest.main()

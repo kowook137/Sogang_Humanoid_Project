@@ -116,3 +116,32 @@ Cloud Shell의 파일 다운로드 메뉴에서 다음 두 경로를 내려받�
 5. 과장된 사투리나 특정 어미 반복이 없는가
 
 10개 결과를 확인하기 전에는 추가 생성이나 학습을 시작하지 않는다.
+
+## 9. 프롬프트 개선판으로 같은 10개 재시험
+
+첫 파일럿과 결과가 섞이지 않도록 새 파일명을 사용한다.
+
+```bash
+cd ~/vertex-teacher
+
+wget -qO generate_vertex_gold_pilot.py \
+  "https://raw.githubusercontent.com/kowook137/Sogang_Humanoid_Project/exaone35-78b-qlora-v3/exaone_finetuning/generate_vertex_gold_pilot.py"
+
+.venv/bin/python generate_vertex_gold_pilot.py \
+  --input data/questions.jsonl \
+  --output data/flash_v2_accepted.jsonl \
+  --rejected data/flash_v2_rejected.jsonl \
+  --model gemini-2.5-flash \
+  --limit 10
+
+wc -l data/flash_v2_accepted.jsonl data/flash_v2_rejected.jsonl
+
+cat data/flash_v2_accepted.jsonl data/flash_v2_rejected.jsonl > data/flash_v2_all.jsonl
+.venv/bin/python gold_review.py prepare \
+  --input data/flash_v2_all.jsonl \
+  --output ~/gemini_flash_pilot_v2.csv \
+  --limit 10
+```
+
+다운로드 경로는 `/home/hanseo501/gemini_flash_pilot_v2.csv`이다. 첫 파일럿 CSV와
+나란히 놓고 의미 보존, 자연스러움, 사투리 강도를 비교한다.

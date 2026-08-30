@@ -15,6 +15,13 @@ class GyeongsangStyleTests(unittest.TestCase):
             "천천히 말씀해 주이소.",
         )
 
+    def test_polite_question_does_not_become_ungrammatical(self):
+        self.assertEqual(
+            style_gyeongsang("어떤 일이 있는지 말씀해 주시겠어요?"),
+            "어떤 일이 있는지 말씀해 주실래예?",
+        )
+        self.assertNotIn("겠네예", style_gyeongsang("말씀해 주시겠어요?"))
+
     def test_does_not_overwrite_existing_dialect(self):
         text = "바로 일으키지는 마이소. 119에 신고하이소."
         self.assertEqual(style_gyeongsang(text), text)

@@ -1,6 +1,12 @@
 import unittest
 
-from exaone_finetuning.dialect_style import has_informal_speech, style_gyeongsang
+from exaone_finetuning.dialect_style import (
+    build_rewrite_messages,
+    clean_rewrite,
+    has_informal_speech,
+    rewrite_is_safe,
+    style_gyeongsang,
+)
 
 
 class GyeongsangStyleTests(unittest.TestCase):
@@ -48,6 +54,31 @@ class GyeongsangStyleTests(unittest.TestCase):
     def test_detects_informal_speech(self):
         self.assertTrue(has_informal_speech("네가 편한 방법으로 해봐."))
         self.assertFalse(has_informal_speech("편한 방법으로 해 보이소."))
+
+    def test_builds_isolated_rewrite_request(self):
+        messages = build_rewrite_messages("사진을 선택하세요.")
+        self.assertEqual([message["role"] for message in messages], ["system", "user"])
+        self.assertEqual(messages[-1]["content"], "사진을 선택하세요.")
+
+    def test_cleans_rewrite_wrapper(self):
+        self.assertEqual(clean_rewrite("출력: 확인해 보이소."), "확인해 보이소.")
+
+    def test_accepts_meaning_preserving_rewrite(self):
+        self.assertTrue(
+            rewrite_is_safe(
+                "사진 3장을 선택하세요.",
+                "사진 3장을 선택하이소.",
+            )
+        )
+
+    def test_rejects_changed_number_and_truncation(self):
+        self.assertFalse(rewrite_is_safe("119에 신고하세요.", "112에 신고하이소."))
+        self.assertFalse(
+            rewrite_is_safe(
+                "사진 앱을 열고 사진을 선택한 뒤 전송 버튼을 누르세요.",
+                "사진 앱을 여이소.",
+            )
+        )
 
 
 if __name__ == "__main__":

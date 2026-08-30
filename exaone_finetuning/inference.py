@@ -12,7 +12,12 @@ from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from chat_session import ChatSession, find_session, list_sessions
-from dialect_style import has_informal_speech, style_gyeongsang
+from dialect_style import (
+    build_rewrite_messages,
+    clean_rewrite,
+    rewrite_is_safe,
+    style_gyeongsang,
+)
 from robot_policy import RobotPolicy
 
 
@@ -236,22 +241,15 @@ def main() -> int:
                 traceback.print_exc()
                 continue
             if args.dialect == "gyeongsang":
-                if has_informal_speech(response):
-                    repair_messages = [
-                        *model_messages,
-                        {"role": "assistant", "content": response},
-                        {
-                            "role": "user",
-                            "content": (
-                                "방금 답변의 사실과 의미는 유지하고, 어르신께 드리는 "
-                                "친근한 존댓말로만 고쳐서 답변 본문만 다시 작성하세요."
-                            ),
-                        },
-                    ]
-                    try:
-                        response = runtime.generate_response(repair_messages, False)
-                    except Exception:
-                        pass
+                try:
+                    rewritten = clean_rewrite(
+                        runtime.generate_response(build_rewrite_messages(response), False)
+                    )
+                    if rewrite_is_safe(response, rewritten):
+                        response = rewritten
+                except Exception:
+                    # The deterministic layer below still provides a safe fallback.
+                    pass
                 response = style_gyeongsang(response)
         session.add_message("assistant", response, reasoning_mode)
         print(f"AI: {response}\n")

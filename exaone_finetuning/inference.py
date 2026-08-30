@@ -75,6 +75,7 @@ class ExaoneRuntime:
             tokenize=True,
             add_generation_prompt=True,
             return_tensors="pt",
+            return_dict=True,
             enable_thinking=reasoning_mode,
         ).to(self.model.device)
         if isinstance(model_inputs, Mapping):

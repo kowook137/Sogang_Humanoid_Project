@@ -32,6 +32,17 @@ class VertexGoldPilotTests(unittest.TestCase):
         )
         self.assertEqual(errors, [])
 
+    def test_rejects_overdone_style(self):
+        errors = validate_candidates(
+            "작은 목표부터 시작해 보세요.",
+            [
+                "작은 목표부터 시작해 보이소.",
+                "작은 목표부터 시작해 보이소, 아입니꺼.",
+                "작은 목표부터 시작하면 좋겠심더.",
+            ],
+        )
+        self.assertIn("candidate_2_overdone_style", errors)
+
 
 if __name__ == "__main__":
     unittest.main()

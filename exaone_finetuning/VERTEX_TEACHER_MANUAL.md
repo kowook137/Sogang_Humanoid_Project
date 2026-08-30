@@ -145,3 +145,33 @@ cat data/flash_v2_accepted.jsonl data/flash_v2_rejected.jsonl > data/flash_v2_al
 
 다운로드 경로는 `/home/hanseo501/gemini_flash_pilot_v2.csv`이다. 첫 파일럿 CSV와
 나란히 놓고 의미 보존, 자연스러움, 사투리 강도를 비교한다.
+
+## 10. 표준 답변과 사투리 변환을 분리한 v3 재시험
+
+v3는 질문별로 API를 두 번 호출한다. 첫 호출은 유용한 표준어 답변을 만들고, 두 번째
+호출은 그 답변의 정보는 건드리지 않고 말투만 변환한다. 따라서 10개 파일럿은 총 20회
+호출하며, 대량 생성 전에 반드시 결과를 검토한다.
+
+```bash
+cd ~/vertex-teacher
+
+wget -qO generate_vertex_gold_pilot.py \
+  "https://raw.githubusercontent.com/kowook137/Sogang_Humanoid_Project/exaone35-78b-qlora-v3/exaone_finetuning/generate_vertex_gold_pilot.py"
+
+.venv/bin/python generate_vertex_gold_pilot.py \
+  --input data/questions.jsonl \
+  --output data/flash_v3_accepted.jsonl \
+  --rejected data/flash_v3_rejected.jsonl \
+  --model gemini-2.5-flash \
+  --limit 10
+
+wc -l data/flash_v3_accepted.jsonl data/flash_v3_rejected.jsonl
+
+cat data/flash_v3_accepted.jsonl data/flash_v3_rejected.jsonl > data/flash_v3_all.jsonl
+.venv/bin/python gold_review.py prepare \
+  --input data/flash_v3_all.jsonl \
+  --output ~/gemini_flash_pilot_v3.csv \
+  --limit 10
+```
+
+다운로드 경로는 `/home/hanseo501/gemini_flash_pilot_v3.csv`이다.

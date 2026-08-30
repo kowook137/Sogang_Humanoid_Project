@@ -32,7 +32,7 @@ def style_gyeongsang(text: str) -> str:
     avoided. Safety facts, numbers, and names are never changed.
     """
     text = text.strip()
-    if not text or GYEONGSANG_MARKERS.search(text):
+    if not text:
         return text
 
     replacements = (
@@ -43,17 +43,28 @@ def style_gyeongsang(text: str) -> str:
         (r"하세요(?=\s*[.!?]|$)", "하이소"),
         (r"드릴게요(?=\s*[.!?]|$)", "드릴게예"),
         (r"할게요(?=\s*[.!?]|$)", "할게예"),
+        (r"어떨까요(?=\s*\?|$)", "어떠신가예"),
         (r"좋겠네요(?=\s*[.!?]|$)", "좋겠네예"),
         (r"겠어요(?=\s*[.!?]|$)", "겠네예"),
+        (r"네요(?=\s*[.!?]|$)", "네예"),
+        (r"거예요(?=\s*[.!?]|$)", "겁니더"),
+        (r"입니다(?=\s*[.!]|$)", "입니더"),
         (r"습니다(?=\s*[.!]|$)", "습니더"),
         (r"인가요(?=\s*\?|$)", "인가예"),
         (r"나요(?=\s*\?|$)", "는가예"),
     )
+    changes = 0
     for pattern, replacement in replacements:
-        text, changed = _replace_once(text, pattern, replacement)
-        if changed:
-            return text
+        while changes < 3:
+            text, changed = _replace_once(text, pattern, replacement)
+            if not changed:
+                break
+            changes += 1
+        if changes >= 3:
+            break
 
     # If no safe inflection is available, preserve the generated answer and add a
     # short, respectful closing rather than corrupting its morphology.
+    if changes or GYEONGSANG_MARKERS.search(text):
+        return text
     return f"{text}\n필요하시면 편하게 말씀해 주이소."

@@ -6,7 +6,7 @@ from exaone_finetuning.dialect_style import has_informal_speech, style_gyeongsan
 class GyeongsangStyleTests(unittest.TestCase):
     def test_changes_safe_polite_ending_without_changing_fact(self):
         result = style_gyeongsang("현재 온도는 24도입니다. 확인해 보세요.")
-        self.assertEqual(result, "현재 온도는 24도입니다. 확인해 보이소.")
+        self.assertEqual(result, "현재 온도는 24도입니더. 확인해 보이소.")
         self.assertIn("24도", result)
 
     def test_uses_specific_request_ending(self):
@@ -18,6 +18,19 @@ class GyeongsangStyleTests(unittest.TestCase):
     def test_does_not_overwrite_existing_dialect(self):
         text = "바로 일으키지는 마이소. 119에 신고하이소."
         self.assertEqual(style_gyeongsang(text), text)
+
+    def test_existing_marker_does_not_block_other_sentences(self):
+        text = "무엇이든 말씀해 주이소. 만나서 반갑습니다. 도움이 필요하시겠네요."
+        self.assertEqual(
+            style_gyeongsang(text),
+            "무엇이든 말씀해 주이소. 만나서 반갑습니더. 도움이 필요하시겠네예.",
+        )
+
+    def test_limits_rewrites_to_three_per_response(self):
+        text = "사진을 확인해 보세요. 앱을 확인해 보세요. 파일을 확인해 보세요. 설정도 확인해 보세요."
+        result = style_gyeongsang(text)
+        self.assertEqual(result.count("보이소"), 3)
+        self.assertIn("보세요", result)
 
     def test_adds_conservative_closing_when_no_safe_rewrite_exists(self):
         self.assertEqual(

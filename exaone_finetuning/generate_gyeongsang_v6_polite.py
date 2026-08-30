@@ -10,7 +10,10 @@ from pathlib import Path
 MODEL = "LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct"
 REVISION = "0ff6b5ec7c13b049b253a16a889aa269e6b79a94"
 POLITE = re.compile(r"(?:요|예|입니더|습니더|하이소|보이소|주이소)[.!?~]*$")
-DIALECT = re.compile(r"(?:마이|몬|우째|묵|이케|그라모|아이가|데이|나예|노|나|입니더|습니더|하이소|보이소|주이소)")
+DIALECT = re.compile(
+    r"(?:마이|몬|우째|묵|이케|그라모|아이가|데이|나예|입니더|습니더|"
+    r"하이소|보이소|주이소|(?:노|나)(?=[.!?~]*$))"
+)
 NUMBER = re.compile(r"\d+(?:[.,]\d+)*")
 LATIN = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
 SYSTEM = """실제 부산 사투리 문장을 어르신께 말하는 현대 부산·경남 존댓말로 바꾸세요.

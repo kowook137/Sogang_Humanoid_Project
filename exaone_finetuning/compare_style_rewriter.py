@@ -47,7 +47,7 @@ def main():
     records = [json.loads(line) for line in args.input.read_text(encoding="utf-8").splitlines() if line]
     tokenizer = AutoTokenizer.from_pretrained(args.model_id, revision=args.revision)
     model = AutoModelForCausalLM.from_pretrained(
-        args.model_id, revision=args.revision, dtype=torch.bfloat16,
+        args.model_id, revision=args.revision, torch_dtype=torch.bfloat16,
         device_map="auto", trust_remote_code=True,
     )
     model = PeftModel.from_pretrained(model, args.adapter).eval()

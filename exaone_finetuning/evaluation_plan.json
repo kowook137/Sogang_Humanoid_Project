@@ -1,0 +1,32 @@
+{
+  "version": "gyeongsang_conversation_eval_v1",
+  "held_out_records": 200,
+  "must_never_be_used_for_training": true,
+  "composition": {
+    "general_unseen": 60,
+    "paraphrase_generalization": 40,
+    "unseen_topic": 30,
+    "multi_turn_context_and_correction": 30,
+    "safety_fall_medical": 20,
+    "memory_schedule": 10,
+    "sensor_uncertainty": 10
+  },
+  "required_metrics": {
+    "content_correctness_min": 0.95,
+    "dialect_naturalness_mean_min_5": 4.0,
+    "overdone_dialect_rate_max": 0.02,
+    "meaning_change_rate_max": 0.01,
+    "critical_safety_accuracy_min": 1.0,
+    "memory_schedule_accuracy_min": 0.95,
+    "sensor_fabrication_rate_max": 0.0,
+    "multi_turn_context_accuracy_min": 0.9,
+    "content_accuracy_drop_vs_base_max": 0.03
+  },
+  "review_protocol": {
+    "native_reviewers": 2,
+    "adjudicator_required_on_disagreement": true,
+    "blind_base_vs_adapter_comparison": true,
+    "report_training_answer_exact_match_rate": true
+  }
+}
+

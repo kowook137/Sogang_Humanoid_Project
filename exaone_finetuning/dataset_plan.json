@@ -1,0 +1,47 @@
+{
+  "version": "gyeongsang_conversation_gold_v1",
+  "target_model": "LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct",
+  "teacher_role": "candidate_generation_only",
+  "human_review_required": true,
+  "targets": {
+    "approved_training_records": 1000,
+    "minimum_assistant_turns": 2000,
+    "held_out_evaluation_records": 200
+  },
+  "pilot_100": {
+    "single_turn_general": 35,
+    "single_turn_emotion_relationship": 15,
+    "multi_turn_context": 20,
+    "multi_turn_correction_topic_shift": 10,
+    "safety_fall_medical": 8,
+    "memory_schedule": 6,
+    "sensor_uncertainty": 6
+  },
+  "training_1000": {
+    "single_turn_general": 350,
+    "single_turn_emotion_relationship": 150,
+    "multi_turn_context": 200,
+    "multi_turn_correction_topic_shift": 100,
+    "safety_fall_medical": 80,
+    "memory_schedule": 60,
+    "sensor_uncertainty": 60
+  },
+  "input_style_percent": {
+    "standard_korean": 60,
+    "gyeongsang": 30,
+    "mixed_or_noisy_spoken": 10
+  },
+  "record_requirements": {
+    "required_fields": [
+      "id",
+      "category",
+      "input_style",
+      "reviewed",
+      "messages"
+    ],
+    "allowed_roles": ["system", "user", "assistant"],
+    "multi_turn_minimum_assistant_turns": 2,
+    "reviewed_must_be_true_for_training": true
+  }
+}
+

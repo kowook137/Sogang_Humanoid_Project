@@ -15,7 +15,8 @@ DIALECT = re.compile(
 )
 OVERDONE = re.compile(
     r"(?:안녕하십니꺼|참말로|쪼매쪼매|아입니꺼|말입니더|"
-    r"라카믄|할라카믄|끼라예|가꼬)"
+    r"라카믄|할라카믄|끼라예|가꼬|우예예|어떠세요예|어떠예|"
+    r"깁니더|심니더|다카이)"
 )
 NUMBER = re.compile(r"\d+(?:[.,]\d+)*")
 LATIN = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
@@ -45,7 +46,8 @@ REWRITE_INSTRUCTION = """당신은 부산에서 성장한 한국어 대화 작�
 - 표준어 문장 끝에 '네예'만 기계적으로 붙이지 않는다.
 - '아이가', '데이'를 반복하는 과장된 방송식 사투리를 쓰지 않는다.
 - '안녕하십니꺼', '참말로', '쪼매쪼매', '아입니꺼', '말입니더', '라카믄',
-  '할라카믄', '끼라예', '가꼬' 같은 연출되거나 강한 표현은 쓰지 않는다.
+  '할라카믄', '끼라예', '가꼬', '우예예', '어떠세요예', '깁니더', '심니더',
+  '다카이' 같은 연출되거나 어색한 표현은 쓰지 않는다.
 - 한 문단에서 눈에 띄는 방언 어미는 두세 번 이내로 제한하고 나머지는 자연스러운
   한국어 존댓말을 사용한다.
 - 세 후보의 의미는 같아야 하지만 표현은 서로 달라야 한다.
@@ -84,22 +86,32 @@ def read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def validate_candidates(standard: str, candidates: list[str]) -> list[str]:
+def validate_candidate(standard: str, candidate: str) -> list[str]:
     errors = []
+    candidate = candidate.strip()
+    if not candidate:
+        return ["empty"]
+    if not DIALECT.search(candidate):
+        errors.append("dialect_not_detected")
+    if OVERDONE.search(candidate):
+        errors.append("overdone_style")
+    if NUMBER.findall(candidate) != NUMBER.findall(standard):
+        errors.append("number_changed")
+    if LATIN.findall(candidate) != LATIN.findall(standard):
+        errors.append("latin_changed")
+    return errors
+
+
+def validate_candidates(standard: str, candidates: list[str]) -> list[str]:
     values = [candidate.strip() for candidate in candidates]
     if len(values) != 3 or any(not candidate for candidate in values):
         return ["three_nonempty_candidates_required"]
-    if len(set(values)) != 3:
-        errors.append("duplicate_candidates")
+    errors = ["duplicate_candidates"] if len(set(values)) != 3 else []
     for index, candidate in enumerate(values, 1):
-        if not DIALECT.search(candidate):
-            errors.append(f"candidate_{index}_dialect_not_detected")
-        if OVERDONE.search(candidate):
-            errors.append(f"candidate_{index}_overdone_style")
-        if NUMBER.findall(candidate) != NUMBER.findall(standard):
-            errors.append(f"candidate_{index}_number_changed")
-        if LATIN.findall(candidate) != LATIN.findall(standard):
-            errors.append(f"candidate_{index}_latin_changed")
+        errors.extend(
+            f"candidate_{index}_{error}"
+            for error in validate_candidate(standard, candidate)
+        )
     return errors
 
 
@@ -164,6 +176,17 @@ def main() -> None:
             data = json.loads(rewrite_response.text)
             candidates = [data[f"candidate_{number}"].strip() for number in range(1, 4)]
             errors = validate_candidates(standard, candidates)
+            candidate_validation = []
+            for candidate_index, candidate in enumerate(candidates, 1):
+                candidate_errors = validate_candidate(standard, candidate)
+                candidate_validation.append(
+                    {
+                        "candidate": candidate_index,
+                        "usable": not candidate_errors,
+                        "errors": candidate_errors,
+                    }
+                )
+            usable_count = sum(item["usable"] for item in candidate_validation)
             answer_usage = getattr(answer_response, "usage_metadata", None)
             rewrite_usage = getattr(rewrite_response, "usage_metadata", None)
             usage_data = {
@@ -180,15 +203,21 @@ def main() -> None:
                 "user": row["user"],
                 "standard_answer": standard,
                 "candidates": candidates,
+                "candidate_validation": candidate_validation,
+                "usable_candidate_count": usable_count,
                 "teacher_model": options.model,
                 "usage": usage_data,
             }
-            target = bad if errors else good
+            target = good if usable_count else bad
             if errors:
-                result["validation_errors"] = errors
+                result["validation_warnings"] = errors
             target.write(json.dumps(result, ensure_ascii=False) + "\n")
             target.flush()
-            print(f"{index}/{len(rows)} {'REJECT ' + ','.join(errors) if errors else 'PASS'}", flush=True)
+            status = "PASS" if usable_count else "REJECT"
+            print(
+                f"{index}/{len(rows)} {status} usable={usable_count}/3",
+                flush=True,
+            )
 
 
 if __name__ == "__main__":

@@ -175,3 +175,37 @@ cat data/flash_v3_accepted.jsonl data/flash_v3_rejected.jsonl > data/flash_v3_al
 ```
 
 다운로드 경로는 `/home/hanseo501/gemini_flash_pilot_v3.csv`이다.
+
+## 11. 후보별 판정과 Gemini 2.5 Pro 10개 비교
+
+이 버전부터 후보 세 개를 각각 판정한다. 후보 하나가 실패했다는 이유로 나머지 후보까지
+버리지 않으며, 사용 가능한 후보가 하나도 없는 질문만 rejected 파일로 보낸다. 검토 CSV의
+`notes` 열에는 `c1=usable` 또는 자동 제외 사유가 기록된다.
+
+```bash
+cd ~/vertex-teacher
+
+wget -qO generate_vertex_gold_pilot.py \
+  "https://raw.githubusercontent.com/kowook137/Sogang_Humanoid_Project/exaone35-78b-qlora-v3/exaone_finetuning/generate_vertex_gold_pilot.py"
+wget -qO gold_review.py \
+  "https://raw.githubusercontent.com/kowook137/Sogang_Humanoid_Project/exaone35-78b-qlora-v3/exaone_finetuning/gold_review.py"
+
+.venv/bin/python generate_vertex_gold_pilot.py \
+  --input data/questions.jsonl \
+  --output data/pro_candidate_accepted.jsonl \
+  --rejected data/pro_candidate_rejected.jsonl \
+  --model gemini-2.5-pro \
+  --limit 10
+
+wc -l data/pro_candidate_accepted.jsonl data/pro_candidate_rejected.jsonl
+
+cat data/pro_candidate_accepted.jsonl data/pro_candidate_rejected.jsonl \
+  > data/pro_candidate_all.jsonl
+.venv/bin/python gold_review.py prepare \
+  --input data/pro_candidate_all.jsonl \
+  --output ~/gemini_pro_candidate_pilot.csv \
+  --limit 10
+```
+
+다운로드 경로는 `/home/hanseo501/gemini_pro_candidate_pilot.csv`이다. 자동 usable은
+최종 승인이 아니므로 사람이 문장 전체를 읽은 뒤 하나를 선택하거나 직접 수정한다.

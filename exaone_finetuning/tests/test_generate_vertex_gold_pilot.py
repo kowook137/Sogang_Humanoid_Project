@@ -1,6 +1,9 @@
 import unittest
 
-from exaone_finetuning.generate_vertex_gold_pilot import validate_candidates
+from exaone_finetuning.generate_vertex_gold_pilot import (
+    validate_candidate,
+    validate_candidates,
+)
 
 
 class VertexGoldPilotTests(unittest.TestCase):
@@ -42,6 +45,16 @@ class VertexGoldPilotTests(unittest.TestCase):
             ],
         )
         self.assertIn("candidate_2_overdone_style", errors)
+
+    def test_candidate_level_validation_keeps_clean_alternative(self):
+        standard = "작은 목표부터 시작해 보세요."
+        self.assertEqual(
+            validate_candidate(standard, "작은 목표부터 시작해 보이소."), []
+        )
+        self.assertIn(
+            "dialect_not_detected",
+            validate_candidate(standard, "작은 목표부터 시작해 보세요."),
+        )
 
 
 if __name__ == "__main__":

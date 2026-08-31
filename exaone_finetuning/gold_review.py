@@ -50,6 +50,14 @@ def normalize_candidate(record: dict) -> dict:
         candidates.insert(0, legacy)
     candidates = [str(value).strip() for value in candidates if str(value).strip()][:3]
     candidates.extend([""] * (3 - len(candidates)))
+    validation_notes = []
+    for result in record.get("candidate_validation") or []:
+        number = result.get("candidate", "?")
+        if result.get("usable"):
+            validation_notes.append(f"c{number}=usable")
+        else:
+            reasons = "+".join(result.get("errors") or ["invalid"])
+            validation_notes.append(f"c{number}={reasons}")
     return {
         "id": str(record.get("id", "")).strip(),
         "topic": str(record.get("topic", "general")).strip(),
@@ -62,7 +70,7 @@ def normalize_candidate(record: dict) -> dict:
         "candidate_3": candidates[2],
         "decision": "",
         "edited_answer": "",
-        "notes": "",
+        "notes": "auto: " + "; ".join(validation_notes) if validation_notes else "",
     }
 
 

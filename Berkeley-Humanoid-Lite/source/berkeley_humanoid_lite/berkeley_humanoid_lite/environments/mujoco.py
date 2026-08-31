@@ -189,15 +189,66 @@ class MujocoSimulator(MujocoEnv):
         self.command_velocity_y = 0.0
         self.command_velocity_yaw = 0.0
 
-        # A short command boost helps the leg-only policy leave its standing attractor.
-        # The existing policy can sustain vx=0.30 after walking starts, but it
-        # needs approximately vx=0.40 to initiate the gait from rest.
-        self._walk_start_boost_enabled = self.cfg.num_actions == 12
-        self._previous_requested_velocity_x = 0.0
-        self._walk_start_boost_steps = 0
-        self._walk_start_boost_velocity = 0.4
-        self._walk_start_minimum_velocity = 0.3
-        self._walk_start_boost_duration = 1.0
+        # Use the leg policy's cleaner vx=0.50 gait for low-speed walking.
+        # Ramp the command so starting and stopping remain smooth.
+        self._natural_gait_enabled = self.cfg.num_actions == 12
+        self._natural_gait_minimum_request = 0.3
+        self._natural_gait_policy_velocity = 0.5
+        self._command_ramp_duration = 0.5
+        self._requested_velocity_x = 0.0
+        self._smoothed_policy_velocity_x = 0.0
+
+        action_indices = {int(index) for index in self.cfg.action_indices}
+        self._passive_joint_indices = torch.tensor(
+            [
+                index
+                for index in range(self.cfg.num_joints)
+                if index not in action_indices
+            ],
+            dtype=torch.long,
+        )
+        self._diagnostic_interval_steps = max(
+            1, int(round(2.0 / self.cfg.policy_dt))
+        )
+
+        # Hold the direction captured when straight walking begins.
+        self._heading_hold_enabled = self.cfg.num_actions == 12
+        self._heading_target_yaw = None
+        self._heading_hold_kp = 0.4
+        self._heading_hold_kd = 0.05
+        self._heading_correction_limit = 0.18
+        self._requested_velocity_yaw = 0.0
+        self._heading_error = 0.0
+
+        # Counter the repeatable left turn during the first gait step.
+        self._walk_start_yaw_bias = 0.0
+        self._walk_start_yaw_bias_duration = 1.2
+        self._walk_start_yaw_bias_total_steps = max(
+            1,
+            int(
+                round(
+                    self._walk_start_yaw_bias_duration
+                    / self.cfg.policy_dt
+                )
+            ),
+        )
+        self._walk_start_yaw_bias_steps = 0
+        self._walk_start_yaw_bias_applied = 0.0
+        self._was_heading_hold_walking = False
+
+        # Line-tracer-style path hold, updated at the 25 Hz policy rate.
+        self._path_hold_enabled = self.cfg.num_actions == 12
+        self._heading_reference_yaw = 0.0
+        self._path_start_xy = None
+        self._cross_track_error = 0.0
+        self._path_lateral_command = 0.0
+        self._path_heading_gain = 1.2
+        self._path_heading_limit = np.deg2rad(12.0)
+        self._path_heading_offset = 0.0
+
+        # Direct vy correction is disabled because the measured response
+        # moved the robot farther away from the reference line.
+        self._path_lateral_limit = 0.0
 
     def _on_key(self, keycode: int) -> None:
         """Forward MuJoCo viewer key events to the keyboard controller."""
@@ -213,6 +264,12 @@ class MujocoSimulator(MujocoEnv):
         self.mj_data.qpos[3:7] = torch.tensor([1.0, 0.0, 0.0, 0.0])  # Default quaternion orientation
         self.mj_data.qpos[7:] = self.cfg.default_joint_positions
         self.mj_data.qvel[:] = 0
+
+        # The reset quaternion is the commanded straight-ahead direction.
+        self._heading_reference_yaw = self._get_heading_yaw()
+        self._path_start_xy = None
+        self._cross_track_error = 0.0
+        self._path_lateral_command = 0.0
 
         observations = self._get_observations()
         return observations
@@ -241,6 +298,7 @@ class MujocoSimulator(MujocoEnv):
             time.sleep(time_until_next_step)
 
         self.n_steps += 1
+        self._maybe_log_gait_diagnostics()
         return observations
 
     def _apply_actions(self, actions: torch.Tensor):
@@ -316,6 +374,324 @@ class MujocoSimulator(MujocoEnv):
         return torch.tensor(self.mj_data.sensordata[self.cfg.num_joints:2*self.cfg.num_joints],
                           dtype=torch.float32)
 
+    def _get_smoothed_policy_velocity_x(
+        self, requested_velocity_x: float
+    ) -> float:
+        """Map low-speed requests to a cleaner gait and ramp commands."""
+        target_velocity_x = requested_velocity_x
+
+        if (
+            self._natural_gait_enabled
+            and abs(requested_velocity_x)
+            >= self._natural_gait_minimum_request - 1.0e-6
+        ):
+            target_velocity_x = np.sign(requested_velocity_x) * max(
+                abs(requested_velocity_x),
+                self._natural_gait_policy_velocity,
+            )
+
+        maximum_change = (
+            self._natural_gait_policy_velocity
+            / self._command_ramp_duration
+            * self.cfg.policy_dt
+        )
+        velocity_change = np.clip(
+            target_velocity_x - self._smoothed_policy_velocity_x,
+            -maximum_change,
+            maximum_change,
+        )
+        self._smoothed_policy_velocity_x += float(velocity_change)
+
+        if (
+            abs(
+                target_velocity_x
+                - self._smoothed_policy_velocity_x
+            )
+            < 1.0e-6
+        ):
+            self._smoothed_policy_velocity_x = float(
+                target_velocity_x
+            )
+
+        return self._smoothed_policy_velocity_x
+
+    def _get_heading_yaw(self) -> float:
+        """Return the robot heading in radians."""
+        quat_w, quat_x, quat_y, quat_z = (
+            float(value) for value in self.mj_data.qpos[3:7]
+        )
+        return float(
+            np.arctan2(
+                2.0 * (
+                    quat_w * quat_z
+                    + quat_x * quat_y
+                ),
+                1.0
+                - 2.0 * (
+                    quat_y ** 2
+                    + quat_z ** 2
+                ),
+            )
+        )
+
+    @staticmethod
+    def _wrap_angle(angle: float) -> float:
+        """Wrap an angle to [-pi, pi]."""
+        return float(
+            (angle + np.pi) % (2.0 * np.pi) - np.pi
+        )
+
+    def _apply_heading_hold(
+        self,
+        requested_velocity_x: float,
+        requested_velocity_yaw: float,
+    ) -> float:
+        """Hold heading and compensate for the first-step left turn."""
+        walking_requested = (
+            self._heading_hold_enabled
+            and abs(requested_velocity_x)
+            >= self._natural_gait_minimum_request - 1.0e-6
+        )
+
+        if not walking_requested:
+            self._heading_target_yaw = None
+            self._heading_error = 0.0
+            self._walk_start_yaw_bias_steps = 0
+            self._walk_start_yaw_bias_applied = 0.0
+            self._was_heading_hold_walking = False
+            return requested_velocity_yaw
+
+        current_yaw = self._get_heading_yaw()
+
+        if not self._was_heading_hold_walking:
+            self._heading_target_yaw = (
+                self._heading_reference_yaw
+            )
+            self._walk_start_yaw_bias_steps = (
+                self._walk_start_yaw_bias_total_steps
+            )
+            self._was_heading_hold_walking = True
+            print(
+                "Heading start assist: "
+                f"bias={self._walk_start_yaw_bias:+.3f}, "
+                f"duration={self._walk_start_yaw_bias_duration:.1f}s"
+            )
+
+        # Q/E 입력 중에는 자동 보정을 해제하고,
+        # 회전 종료 지점을 새로운 직진 방향으로 저장합니다.
+        if abs(requested_velocity_yaw) > 1.0e-6:
+            self._heading_reference_yaw = current_yaw
+            self._heading_target_yaw = current_yaw
+            self._heading_error = 0.0
+            self._walk_start_yaw_bias_steps = 0
+            self._walk_start_yaw_bias_applied = 0.0
+            return requested_velocity_yaw
+
+        desired_heading_yaw = self._wrap_angle(
+            self._heading_target_yaw
+            + self._path_heading_offset
+        )
+        self._heading_error = self._wrap_angle(
+            current_yaw - desired_heading_yaw
+        )
+        yaw_rate = float(self.mj_data.qvel[5])
+
+        feedback_correction = (
+            -self._heading_hold_kp * self._heading_error
+            -self._heading_hold_kd * yaw_rate
+        )
+
+        self._walk_start_yaw_bias_applied = 0.0
+        if (
+            requested_velocity_x > 0.0
+            and self._walk_start_yaw_bias_steps > 0
+        ):
+            remaining_ratio = (
+                self._walk_start_yaw_bias_steps
+                / self._walk_start_yaw_bias_total_steps
+            )
+            self._walk_start_yaw_bias_applied = (
+                self._walk_start_yaw_bias
+                * remaining_ratio
+            )
+            self._walk_start_yaw_bias_steps -= 1
+
+        correction = (
+            feedback_correction
+            + self._walk_start_yaw_bias_applied
+        )
+
+        return float(
+            np.clip(
+                correction,
+                -self._heading_correction_limit,
+                self._heading_correction_limit,
+            )
+        )
+
+    def _apply_lateral_path_hold(
+        self,
+        requested_velocity_x: float,
+        requested_velocity_y: float,
+        requested_velocity_yaw: float,
+    ) -> float:
+        """Steer toward the reference line using cross-track error."""
+        walking_requested = (
+            self._path_hold_enabled
+            and abs(requested_velocity_x)
+            >= self._natural_gait_minimum_request - 1.0e-6
+        )
+
+        if not walking_requested:
+            self._path_start_xy = None
+            self._cross_track_error = 0.0
+            self._path_heading_offset = 0.0
+            self._path_lateral_command = 0.0
+            return requested_velocity_y
+
+        current_xy = np.asarray(
+            self.mj_data.qpos[0:2],
+            dtype=float,
+        ).copy()
+
+        if self._path_start_xy is None:
+            self._path_start_xy = current_xy.copy()
+
+        # A/D 또는 Q/E 입력 중에는 사용자의 명령을 우선하고,
+        # 입력 종료 위치에서 새로운 기준선을 시작합니다.
+        if (
+            abs(requested_velocity_y) > 1.0e-6
+            or abs(requested_velocity_yaw) > 1.0e-6
+        ):
+            self._path_start_xy = current_xy.copy()
+            self._cross_track_error = 0.0
+            self._path_heading_offset = 0.0
+            self._path_lateral_command = 0.0
+            return requested_velocity_y
+
+        path_yaw = self._heading_reference_yaw
+        left_direction = np.array(
+            [-np.sin(path_yaw), np.cos(path_yaw)],
+            dtype=float,
+        )
+
+        position_delta = current_xy - self._path_start_xy
+        self._cross_track_error = float(
+            np.dot(position_delta, left_direction)
+        )
+
+        # 왼쪽의 양수 오차가 커질수록 오른쪽을 바라보도록
+        # 목표 heading을 최대 12도까지 변경합니다.
+        self._path_heading_offset = float(
+            np.clip(
+                -self._path_heading_gain
+                * self._cross_track_error,
+                -self._path_heading_limit,
+                self._path_heading_limit,
+            )
+        )
+
+        # 현재 정책에서는 직접 vy 보정을 사용하지 않습니다.
+        self._path_lateral_command = 0.0
+        return 0.0
+
+    def _maybe_log_gait_diagnostics(self) -> None:
+        """Report actual speed and passive-arm loading every two seconds."""
+        if (
+            not self._natural_gait_enabled
+            or self.n_steps % self._diagnostic_interval_steps != 0
+        ):
+            return
+
+        world_velocity = torch.as_tensor(
+            self.mj_data.qvel[0:3],
+            dtype=torch.float32,
+        )
+        base_quat = torch.as_tensor(
+            self.mj_data.qpos[3:7],
+            dtype=torch.float32,
+        )
+        body_velocity = quat_rotate_inverse(
+            base_quat,
+            world_velocity,
+        )
+
+        world_velocity_x = float(world_velocity[0])
+        world_velocity_y = float(world_velocity[1])
+        body_forward_velocity = float(body_velocity[0])
+
+        quat_w, quat_x, quat_y, quat_z = (
+            float(value) for value in base_quat
+        )
+        heading_yaw = float(
+            np.arctan2(
+                2.0 * (
+                    quat_w * quat_z
+                    + quat_x * quat_y
+                ),
+                1.0
+                - 2.0 * (
+                    quat_y ** 2
+                    + quat_z ** 2
+                ),
+            )
+        )
+        yaw_rate = float(self.mj_data.qvel[5])
+        base_angular_speed = float(
+            np.linalg.norm(self.mj_data.qvel[3:6])
+        )
+
+        if self._passive_joint_indices.numel() > 0:
+            applied_torques = torch.as_tensor(
+                self.mj_data.ctrl,
+                dtype=torch.float32,
+            )
+            arm_torques = applied_torques[
+                self._passive_joint_indices
+            ]
+            arm_limits = self.effort_limits[
+                self._passive_joint_indices
+            ]
+            valid_limits = arm_limits > 1.0e-6
+
+            arm_torque_rms = float(
+                torch.sqrt(torch.mean(arm_torques ** 2))
+            )
+
+            if bool(torch.any(valid_limits)):
+                arm_saturation_percent = float(
+                    (
+                        torch.abs(arm_torques[valid_limits])
+                        >= arm_limits[valid_limits] - 1.0e-6
+                    ).float().mean()
+                    * 100.0
+                )
+            else:
+                arm_saturation_percent = 0.0
+        else:
+            arm_torque_rms = 0.0
+            arm_saturation_percent = 0.0
+
+        print(
+            "Gait diagnostic: "
+            f"requested vx={self._requested_velocity_x:+.2f}, "
+            f"policy vx={self.command_velocity_x:+.2f}, "
+            f"policy vy={self.command_velocity_y:+.3f}, "
+            f"cross track={self._cross_track_error:+.3f} m, "
+            f"path heading={np.degrees(self._path_heading_offset):+.1f} deg, "
+            f"world vx={world_velocity_x:+.2f}, "
+            f"world vy={world_velocity_y:+.2f}, "
+            f"body forward={body_forward_velocity:+.2f}, "
+            f"yaw={np.degrees(heading_yaw):+.1f} deg, "
+            f"yaw error={np.degrees(self._heading_error):+.1f} deg, "
+            f"yaw command={self.command_velocity_yaw:+.3f}, "
+            f"start yaw bias={self._walk_start_yaw_bias_applied:+.3f}, "
+            f"yaw rate={yaw_rate:+.2f}, "
+            f"arm torque rms={arm_torque_rms:.2f}, "
+            f"arm saturation={arm_saturation_percent:.0f}%, "
+            f"base angular speed={base_angular_speed:.2f}"
+        )
+
     def _get_observations(self) -> torch.Tensor:
         """Get complete observation vector for the policy.
 
@@ -327,48 +703,22 @@ class MujocoSimulator(MujocoEnv):
             self.command_controller.get_velocity()
         )
 
-        requested_velocity_x = command_velocity_x
-        minimum_velocity = self._walk_start_minimum_velocity
-        boost_velocity = self._walk_start_boost_velocity
-
-        crossed_start_threshold = (
-            self._walk_start_boost_enabled
-            and abs(requested_velocity_x) >= minimum_velocity - 1.0e-6
-            and abs(self._previous_requested_velocity_x)
-            < minimum_velocity - 1.0e-6
-            and abs(requested_velocity_x) < boost_velocity - 1.0e-6
+        self._requested_velocity_x = command_velocity_x
+        command_velocity_x = self._get_smoothed_policy_velocity_x(
+            command_velocity_x
         )
 
-        if crossed_start_threshold:
-            self._walk_start_boost_steps = max(
-                1,
-                int(
-                    round(
-                        self._walk_start_boost_duration
-                        / self.cfg.policy_dt
-                    )
-                ),
-            )
-            print(
-                f"Walk-start boost: requested vx="
-                f"{requested_velocity_x:+.2f}, "
-                f"policy vx="
-                f"{np.sign(requested_velocity_x) * boost_velocity:+.2f}"
-            )
+        self._requested_velocity_yaw = command_velocity_yaw
+        command_velocity_y = self._apply_lateral_path_hold(
+            self._requested_velocity_x,
+            command_velocity_y,
+            self._requested_velocity_yaw,
+        )
+        command_velocity_yaw = self._apply_heading_hold(
+            self._requested_velocity_x,
+            command_velocity_yaw,
+        )
 
-        if (
-            self._walk_start_boost_steps > 0
-            and abs(requested_velocity_x)
-            >= minimum_velocity - 1.0e-6
-        ):
-            command_velocity_x = (
-                np.sign(requested_velocity_x) * boost_velocity
-            )
-            self._walk_start_boost_steps -= 1
-        else:
-            self._walk_start_boost_steps = 0
-
-        self._previous_requested_velocity_x = requested_velocity_x
         self.command_velocity_x = command_velocity_x
         self.command_velocity_y = command_velocity_y
         self.command_velocity_yaw = command_velocity_yaw

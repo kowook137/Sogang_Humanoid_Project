@@ -209,3 +209,48 @@ cat data/pro_candidate_accepted.jsonl data/pro_candidate_rejected.jsonl \
 
 다운로드 경로는 `/home/hanseo501/gemini_pro_candidate_pilot.csv`이다. 자동 usable은
 최종 승인이 아니므로 사람이 문장 전체를 읽은 뒤 하나를 선택하거나 직접 수정한다.
+
+## 12. 승인된 구성으로 Pro 100개 생성
+
+100개는 일반 단일 대화만 모은 자료가 아니다. 정본 계획에 따라 일반·감정·다중 턴·
+정정·안전·기억·센서 시나리오를 섞고, 입력도 표준어 60%, 경상도 30%, 구어체·오타형
+10%로 구성한다. 질문마다 표준 답변과 사투리 후보를 별도 호출하므로 최대 200회 호출한다.
+
+```bash
+cd ~/vertex-teacher
+
+BASE="https://raw.githubusercontent.com/kowook137/Sogang_Humanoid_Project/exaone35-78b-qlora-v3/exaone_finetuning"
+wget -qO build_pilot_100_scenarios.py "$BASE/build_pilot_100_scenarios.py"
+wget -qO generate_vertex_gold_pilot.py "$BASE/generate_vertex_gold_pilot.py"
+wget -qO gold_review.py "$BASE/gold_review.py"
+
+.venv/bin/python build_pilot_100_scenarios.py \
+  --output data/gyeongsang_conversation_pilot_100.jsonl
+
+.venv/bin/python generate_vertex_gold_pilot.py \
+  --input data/gyeongsang_conversation_pilot_100.jsonl \
+  --output data/pro_100_accepted.jsonl \
+  --rejected data/pro_100_rejected.jsonl \
+  --model gemini-2.5-pro \
+  --limit 100
+```
+
+인터넷이 끊기거나 Cloud Shell이 종료되면 마지막 명령을 그대로 다시 실행한다. 이미
+accepted 또는 rejected 파일에 기록된 ID는 건너뛰므로 처음부터 다시 과금하지 않는다.
+
+완료 여부와 검토 CSV는 다음과 같이 만든다.
+
+```bash
+wc -l data/pro_100_accepted.jsonl data/pro_100_rejected.jsonl
+
+cat data/pro_100_accepted.jsonl data/pro_100_rejected.jsonl \
+  > data/pro_100_all.jsonl
+.venv/bin/python gold_review.py prepare \
+  --input data/pro_100_all.jsonl \
+  --output ~/gemini_pro_conversation_100.csv \
+  --limit 100
+```
+
+accepted와 rejected의 합이 100이어야 생성이 끝난 것이다. 다운로드 경로는
+`/home/hanseo501/gemini_pro_conversation_100.csv`이다. `context_json` 열은 다중 대화의
+이전 문맥이며, `notes` 열은 후보별 자동판정이다.

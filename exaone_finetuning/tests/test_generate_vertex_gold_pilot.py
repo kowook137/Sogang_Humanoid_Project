@@ -1,12 +1,27 @@
 import unittest
 
 from exaone_finetuning.generate_vertex_gold_pilot import (
+    conversation_prompt,
+    final_user_message,
+    input_messages,
     validate_candidate,
     validate_candidates,
 )
 
 
 class VertexGoldPilotTests(unittest.TestCase):
+    def test_formats_multi_turn_input(self):
+        row = {
+            "messages": [
+                {"role": "user", "content": "제 이름은 영희예요."},
+                {"role": "assistant", "content": "반갑습니더, 영희님."},
+                {"role": "user", "content": "제 이름이 뭐였죠?"},
+            ]
+        }
+        messages = input_messages(row)
+        self.assertEqual(final_user_message(messages), "제 이름이 뭐였죠?")
+        self.assertIn("AI: 반갑습니더, 영희님.", conversation_prompt(messages))
+
     def test_accepts_three_distinct_grounded_candidates(self):
         standard = "119에 전화하고 바로 일으키지 마세요."
         candidates = [

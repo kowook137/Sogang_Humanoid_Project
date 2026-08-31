@@ -12,7 +12,10 @@ from pathlib import Path
 FIELDS = [
     "id",
     "topic",
+    "category",
+    "input_style",
     "user",
+    "context_json",
     "standard_answer",
     "candidate_1",
     "candidate_2",
@@ -61,7 +64,12 @@ def normalize_candidate(record: dict) -> dict:
     return {
         "id": str(record.get("id", "")).strip(),
         "topic": str(record.get("topic", "general")).strip(),
+        "category": str(record.get("category", record.get("topic", "general"))).strip(),
+        "input_style": str(record.get("input_style", "standard_korean")).strip(),
         "user": str(record.get("user", record.get("prompt", ""))).strip(),
+        "context_json": json.dumps(
+            record.get("context_messages") or [], ensure_ascii=False
+        ),
         "standard_answer": str(
             record.get("standard_answer", record.get("dialect_non_polite", ""))
         ).strip(),
@@ -90,7 +98,8 @@ def prepare(input_path: Path, output_path: Path, limit: int) -> None:
 def read_review_csv(path: Path) -> list[dict]:
     with path.open(encoding="utf-8-sig", newline="") as stream:
         reader = csv.DictReader(stream)
-        missing = set(FIELDS) - set(reader.fieldnames or [])
+        optional = {"category", "input_style", "context_json"}
+        missing = set(FIELDS) - optional - set(reader.fieldnames or [])
         if missing:
             raise ValueError(f"missing CSV columns: {', '.join(sorted(missing))}")
         return [{key: (row.get(key) or "").strip() for key in FIELDS} for row in reader]
@@ -149,15 +158,27 @@ def export(rows: list[dict], output_dir: Path, validation_percent: int) -> None:
         chosen = selected_answer(row)
         if not chosen:
             continue
+        context = []
+        if row.get("context_json"):
+            try:
+                context = json.loads(row["context_json"])
+            except json.JSONDecodeError as error:
+                raise ValueError(f"{row['id']}: invalid context_json: {error}") from error
+            if not isinstance(context, list):
+                raise ValueError(f"{row['id']}: context_json must contain a list")
+        if not context:
+            context = [{"role": "user", "content": row["user"]}]
         sample = {
             "id": row["id"],
             "topic": row["topic"],
+            "category": row.get("category") or row["topic"],
+            "input_style": row.get("input_style") or "standard_korean",
             "reviewed": True,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": row["user"]},
-                {"role": "assistant", "content": chosen},
-            ],
+            "messages": (
+                [{"role": "system", "content": SYSTEM_PROMPT}]
+                + context
+                + [{"role": "assistant", "content": chosen}]
+            ),
         }
         target = validation if validation_split(row["id"], validation_percent) else train
         target.append(sample)

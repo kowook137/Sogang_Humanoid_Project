@@ -22,18 +22,20 @@
 - 자동검사를 후보 단위로 바꾸고 검토 CSV에 후보별 사유를 기록하도록 구현했다.
 - Gemini 2.5 Pro 10개 파일럿에서 모든 질문에 사용 가능한 후보가 최소 하나 존재했다.
 - Pro 파일럿에 대해 8개 직접 선택, 2개 수정 권장안을 작성했다. 사용자의 최종 검수
-  확정과 export는 아직 수행하지 않았다.
+  의견까지 확인하여 100개 확장 파일럿 진행을 결정했다. 10개 export는 100개 검수본과
+  합칠 때 함께 처리한다.
+- `dataset_plan.json`의 정확한 비율을 따르는 100개 시나리오 빌더를 추가했다.
+- 후보 생성기와 검토·export 도구가 다중 대화 문맥을 보존하도록 확장했다.
 
 ## 바로 다음 작업
 
-1. `gemini_pro_candidate_pilot.csv`에 최종 `decision`과 필요한 `edited_answer`를 기록한다.
-2. `gold_review.py validate`와 `gold_review.py export`로 승인 데이터만 내보낸다.
-3. `dataset_plan.json`의 `pilot_100` 비율에 맞춰 단일·다중 대화 시나리오 100개를 만든다.
-4. Gemini Pro로 후보를 생성하고 부산·경남 화자가 전량 검수한다.
-5. `validate_conversation_dataset.py --strict`로 구조·중복·검수 여부를 검사한다.
-6. 100개에서 직접 채택 또는 수정 가능 비율이 80% 이상이면 1,000개로 확대한다.
-7. 학습 데이터와 별도로 비공개 평가 200개를 제작한다.
-8. EXAONE QLoRA 후 베이스 모델과 어댑터를 동일 평가 세트로 비교한다.
+1. Cloud Shell에서 100개 시나리오를 생성한다.
+2. Gemini Pro로 후보를 생성하고 부산·경남 화자가 전량 검수한다.
+3. `gold_review.py validate`와 `gold_review.py export`로 승인 데이터만 내보낸다.
+4. `validate_conversation_dataset.py --strict`로 구조·중복·검수 여부를 검사한다.
+5. 100개에서 직접 채택 또는 수정 가능 비율이 80% 이상이면 1,000개로 확대한다.
+6. 학습 데이터와 별도로 비공개 평가 200개를 제작한다.
+7. EXAONE QLoRA 후 베이스 모델과 어댑터를 동일 평가 세트로 비교한다.
 
 ## 재개 명령
 

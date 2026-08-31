@@ -63,6 +63,35 @@ class GoldReviewTests(unittest.TestCase):
             self.assertEqual(summary["preference_pairs"], 20)
             self.assertGreater(summary["validation"], 0)
 
+    def test_export_preserves_multi_turn_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rows = []
+            for number in range(20):
+                row = {field: "" for field in FIELDS}
+                context = [
+                    {"role": "user", "content": "제 이름은 영희예요."},
+                    {"role": "assistant", "content": "반갑습니더, 영희님."},
+                    {"role": "user", "content": "제 이름이 뭐였죠?"},
+                ]
+                row.update(
+                    {
+                        "id": f"memory-{number}",
+                        "topic": "memory_schedule",
+                        "user": "제 이름이 뭐였죠?",
+                        "context_json": json.dumps(context, ensure_ascii=False),
+                        "candidate_1": "영희님이라고 하셨습니더.",
+                        "decision": "accept_1",
+                    }
+                )
+                rows.append(row)
+            export(rows, root / "out", 20)
+            exported = []
+            for path in (root / "out" / "train.jsonl", root / "out" / "validation.jsonl"):
+                exported.extend(json.loads(line) for line in path.read_text().splitlines())
+            self.assertEqual(exported[0]["messages"][-2]["content"], "제 이름이 뭐였죠?")
+            self.assertEqual(exported[0]["messages"][-1]["role"], "assistant")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -86,6 +86,29 @@ def read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+def input_messages(row: dict) -> list[dict]:
+    messages = row.get("messages")
+    if isinstance(messages, list) and messages:
+        return messages
+    return [{"role": "user", "content": row["user"]}]
+
+
+def final_user_message(messages: list[dict]) -> str:
+    for message in reversed(messages):
+        if message.get("role") == "user":
+            return str(message.get("content", "")).strip()
+    raise ValueError("conversation requires at least one user message")
+
+
+def conversation_prompt(messages: list[dict]) -> str:
+    labels = {"system": "시스템", "user": "사용자", "assistant": "AI"}
+    return "\n".join(
+        f"{labels.get(message.get('role'), message.get('role'))}: "
+        f"{str(message.get('content', '')).strip()}"
+        for message in messages
+    )
+
+
 def validate_candidate(standard: str, candidate: str) -> list[str]:
     errors = []
     candidate = candidate.strip()
@@ -149,9 +172,15 @@ def main() -> None:
         for index, row in enumerate(rows, 1):
             if row["id"] in done:
                 continue
+            messages = input_messages(row)
+            user = final_user_message(messages)
+            context = conversation_prompt(messages)
             answer_response = client.models.generate_content(
                 model=options.model,
-                contents=f"사용자 질문:\n{row['user']}",
+                contents=(
+                    "다음 대화의 마지막 사용자 발화에 답하세요. 이전 대화가 있으면 "
+                    f"그 문맥과 수정 사항을 반영하세요.\n\n{context}"
+                ),
                 config=GenerateContentConfig(
                     system_instruction=ANSWER_INSTRUCTION,
                     temperature=0.1,
@@ -163,7 +192,7 @@ def main() -> None:
             rewrite_response = client.models.generate_content(
                 model=options.model,
                 contents=(
-                    f"사용자 질문:\n{row['user']}\n\n"
+                    f"대화 문맥:\n{context}\n\n"
                     f"변환할 표준어 답변:\n{standard}"
                 ),
                 config=GenerateContentConfig(
@@ -199,8 +228,11 @@ def main() -> None:
             }
             result = {
                 "id": row["id"],
-                "topic": row.get("topic", "general"),
-                "user": row["user"],
+                "topic": row.get("topic", row.get("category", "general")),
+                "category": row.get("category", row.get("topic", "general")),
+                "input_style": row.get("input_style", "standard_korean"),
+                "user": user,
+                "context_messages": messages,
                 "standard_answer": standard,
                 "candidates": candidates,
                 "candidate_validation": candidate_validation,

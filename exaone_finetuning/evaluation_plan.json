@@ -1,5 +1,6 @@
 {
-  "version": "gyeongsang_conversation_eval_v1",
+  "version": "busan_conversation_eval_v1",
+  "target_locale": "busan_modern_polite",
   "held_out_records": 200,
   "must_never_be_used_for_training": true,
   "composition": {
@@ -29,4 +30,3 @@
     "report_training_answer_exact_match_rate": true
   }
 }
-

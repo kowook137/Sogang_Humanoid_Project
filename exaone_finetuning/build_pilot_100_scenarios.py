@@ -138,7 +138,7 @@ def styled_user(text: str, index: int) -> tuple[str, str]:
         return text, "standard_korean"
     if slot < 9:
         prefixes = ("저기예, ", "있잖아예, ", "그라모 ")
-        return prefixes[(slot - 6) % len(prefixes)] + text, "gyeongsang"
+        return prefixes[(slot - 6) % len(prefixes)] + text, "busan"
     return "어... " + text.rstrip("?"), "mixed_or_noisy_spoken"
 
 
@@ -218,4 +218,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

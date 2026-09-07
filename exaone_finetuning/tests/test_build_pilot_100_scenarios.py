@@ -28,7 +28,7 @@ class Pilot100ScenarioTests(unittest.TestCase):
             Counter(
                 {
                     "standard_korean": 60,
-                    "gyeongsang": 30,
+                    "busan": 30,
                     "mixed_or_noisy_spoken": 10,
                 }
             ),

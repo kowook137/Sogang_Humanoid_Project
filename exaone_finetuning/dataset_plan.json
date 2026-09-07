@@ -1,5 +1,7 @@
 {
-  "version": "gyeongsang_conversation_gold_v1",
+  "version": "busan_conversation_gold_v1",
+  "target_locale": "busan_modern_polite",
+  "future_locales": ["daegu_modern_polite"],
   "target_model": "LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct",
   "teacher_role": "candidate_generation_only",
   "human_review_required": true,
@@ -28,7 +30,7 @@
   },
   "input_style_percent": {
     "standard_korean": 60,
-    "gyeongsang": 30,
+    "busan": 30,
     "mixed_or_noisy_spoken": 10
   },
   "record_requirements": {
@@ -44,4 +46,3 @@
     "reviewed_must_be_true_for_training": true
   }
 }
-

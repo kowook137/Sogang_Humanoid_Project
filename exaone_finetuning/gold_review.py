@@ -1,4 +1,4 @@
-"""Prepare, validate, and export human-reviewed Gyeongsang dialogue data."""
+"""Prepare, validate, and export human-reviewed modern Busan dialogue data."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ FIELDS = [
 DECISIONS = {"", "accept_1", "accept_2", "accept_3", "edit", "reject"}
 SYSTEM_PROMPT = (
     "어르신과 대화하는 친절한 AI입니다. 정확하고 안전하게 답하면서 "
-    "현대 부산·경남의 자연스러운 존댓말을 사용하세요."
+    "현대 부산의 자연스러운 존댓말을 사용하세요."
 )
 
 

@@ -44,11 +44,55 @@ class VertexGoldPilotTests(unittest.TestCase):
             "간단한 음식이 좋겠습니다.",
             [
                 "간단한 음식이 좋겠심더.",
-                "간단한 음식이면 괜찮을낍니더.",
-                "간단한 음식은 어떻겠능교?",
+                "간단한 음식이면 괜찮으십니더.",
+                "간단한 음식이 괜찮겠심더.",
             ],
         )
         self.assertEqual(errors, [])
+
+    def test_recognizes_honorific_sipnider(self):
+        self.assertEqual(
+            validate_candidate("따님 성함은 수진님이십니다.", "따님 성함은 수진님이십니더."),
+            [],
+        )
+
+    def test_accepts_tv_and_television_as_same_latin_term(self):
+        self.assertEqual(
+            validate_candidate(
+                "텔레비전 프로그램을 보세요.",
+                "TV 프로그램을 한번 보이소.",
+            ),
+            [],
+        )
+
+    def test_rejects_observed_awkward_forms_and_overuse(self):
+        self.assertIn(
+            "overdone_style",
+            validate_candidate("문을 열어보세요.", "문을 여이소."),
+        )
+        self.assertIn(
+            "dialect_overused",
+            validate_candidate(
+                "확인하고 선택한 뒤 알려주세요. 그러면 처리하겠습니다.",
+                "확인해 보이소. 선택해 보이소. 알려주이소. 처리하겠습니더.",
+            ),
+        )
+
+    def test_rejects_changed_negation_question_and_critical_term(self):
+        errors = validate_candidate(
+            "숨을 쉬지 않으면 119에 신고하세요?",
+            "숨을 쉬면 112에 신고하이소.",
+        )
+        self.assertIn("number_changed", errors)
+        self.assertIn("negation_changed", errors)
+        self.assertIn("critical_term_changed:119", errors)
+        self.assertIn("critical_term_changed:112", errors)
+
+    def test_rejects_added_intensifier(self):
+        self.assertIn(
+            "intensifier_added",
+            validate_candidate("먼저 신고하세요.", "무조건 먼저 신고하이소."),
+        )
 
     def test_rejects_overdone_style(self):
         errors = validate_candidates(

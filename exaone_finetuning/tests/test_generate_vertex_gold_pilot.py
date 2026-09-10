@@ -35,8 +35,8 @@ class VertexGoldPilotTests(unittest.TestCase):
         standard = "현재 센서값이 없어 실내 온도를 알 수 없습니다."
         candidates = [
             standard,
-            "현재 센서값이 없어 실내 온도는 알 수 없네예.",
-            "현재 센서값이 없어 실내 온도는 확인하기 어렵지예.",
+            "현재 센서값이 없어서 실내 온도를 알 수 없습니다.",
+            "현재 센서값이 없으므로 실내 온도는 확인할 수 없습니다.",
         ]
         self.assertEqual(validate_candidates(standard, candidates), [])
 
@@ -56,16 +56,38 @@ class VertexGoldPilotTests(unittest.TestCase):
         self.assertNotIn("candidate_1_dialect_not_detected", errors)
         self.assertIn("candidate_2_number_changed", errors)
 
-    def test_accepts_current_target_endings(self):
-        errors = validate_candidates(
-            "간단한 음식이 좋겠습니다.",
-            [
-                "간단한 음식이 좋겠네예.",
-                "간단한 음식이면 괜찮지예.",
-                "간단한 음식이 좋을 것 같네예.",
-            ],
+    def test_accepts_current_target_endings_when_source_alignment_is_grounded(self):
+        for standard, candidate in (
+            ("간단한 음식이 좋겠네요.", "간단한 음식이 좋겠네예."),
+            ("간단한 음식이 좋지요.", "간단한 음식이 좋지예."),
+        ):
+            self.assertEqual(
+                validate_candidate(standard, candidate, allow_standard=True), []
+            )
+
+    def test_only_accepts_aihub_grounded_source_to_ending_alignment(self):
+        self.assertEqual(
+            validate_candidate(
+                "맛있겠네요.", "맛있겠네예.", allow_standard=True
+            ),
+            [],
         )
-        self.assertEqual(errors, [])
+        self.assertEqual(
+            validate_candidate("그렇지요?", "그지예?", allow_standard=True),
+            [],
+        )
+        self.assertIn(
+            "unsupported_jiye_conversion",
+            validate_candidate(
+                "위험한 상황입니다.", "위험한 상황이지예.", allow_standard=True
+            ),
+        )
+        self.assertIn(
+            "unsupported_neye_conversion",
+            validate_candidate(
+                "만나서 반갑습니다.", "만나서 반갑네예.", allow_standard=True
+            ),
+        )
 
     def test_rejects_nider_for_current_target_even_when_honorific(self):
         self.assertIn(

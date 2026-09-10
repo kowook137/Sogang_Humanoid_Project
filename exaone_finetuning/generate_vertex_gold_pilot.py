@@ -30,6 +30,10 @@ DIALECT_FEATURE = re.compile(
 ADDED_INTENSIFIER = re.compile(r"(?:제일|엄청|무조건|진짜|딴 거보다|쪼매|확실히)")
 NEGATION = re.compile(r"(?:안 |않|못 |마세요|마이소|아니|없|금지|절대)")
 CRITICAL_TERMS = ("119", "112", "의식", "호흡", "가슴 압박", "신고", "대피")
+JIYE = re.compile(r"지예")
+JIYO_SOURCE = re.compile(r"(?:지요|죠)")
+NEYE = re.compile(r"네예")
+NEYO_SOURCE = re.compile(r"네요")
 
 
 def latin_terms(text: str) -> list[str]:
@@ -202,6 +206,10 @@ def validate_candidate(
         errors.append("intensifier_added")
     if bool(NEGATION.search(standard)) != bool(NEGATION.search(candidate)):
         errors.append("negation_changed")
+    if JIYE.search(candidate) and not JIYO_SOURCE.search(standard):
+        errors.append("unsupported_jiye_conversion")
+    if NEYE.search(candidate) and not NEYO_SOURCE.search(standard):
+        errors.append("unsupported_neye_conversion")
     if standard.count("?") != candidate.count("?"):
         errors.append("sentence_function_changed")
     for term in CRITICAL_TERMS:
@@ -292,7 +300,9 @@ def main() -> None:
             errors = validate_candidates(standard, candidates)
             candidate_validation = []
             for candidate_index, candidate in enumerate(candidates, 1):
-                candidate_errors = validate_candidate(standard, candidate)
+                candidate_errors = validate_candidate(
+                    standard, candidate, allow_standard=True
+                )
                 candidate_validation.append(
                     {
                         "candidate": candidate_index,

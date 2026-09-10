@@ -73,9 +73,8 @@ def main() -> None:
 
     rows = read_jsonl(options.input)[: options.limit]
     done = set()
-    for path in (options.output, options.errors):
-        if path.exists():
-            done.update(row["id"] for row in read_jsonl(path))
+    if options.output.exists():
+        done.update(row["id"] for row in read_jsonl(options.output))
 
     client = genai.Client(
         vertexai=True,

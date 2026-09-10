@@ -31,30 +31,59 @@ class VertexGoldPilotTests(unittest.TestCase):
         ]
         self.assertEqual(validate_candidates(standard, candidates), [])
 
-    def test_rejects_missing_dialect_and_changed_number(self):
+    def test_first_candidate_may_remain_standard_for_conservative_generation(self):
+        standard = "현재 센서값이 없어 실내 온도를 알 수 없습니다."
+        candidates = [
+            standard,
+            "현재 센서값이 없어 실내 온도는 알 수 없네예.",
+            "현재 센서값이 없어 실내 온도는 확인하기 어렵지예.",
+        ]
+        self.assertEqual(validate_candidates(standard, candidates), [])
+
+    def test_all_candidates_may_remain_standard_when_dialect_is_uncertain(self):
+        standard = "현재 센서값이 없어 실내 온도를 알 수 없습니다."
+        errors = validate_candidates(
+            standard,
+            [standard, "현재 실내 온도를 알 수 없습니다.", "알 수 없네예."],
+        )
+        self.assertNotIn("candidate_2_dialect_not_detected", errors)
+
+    def test_allows_conservative_first_candidate_and_rejects_changed_number(self):
         errors = validate_candidates(
             "119에 전화하세요.",
             ["119에 전화하세요.", "112에 전화하이소.", "119에 전화해 주이소."],
         )
-        self.assertIn("candidate_1_dialect_not_detected", errors)
+        self.assertNotIn("candidate_1_dialect_not_detected", errors)
         self.assertIn("candidate_2_number_changed", errors)
 
-    def test_accepts_observed_modern_endings(self):
+    def test_accepts_current_target_endings(self):
         errors = validate_candidates(
             "간단한 음식이 좋겠습니다.",
             [
-                "간단한 음식이 좋겠심더.",
-                "간단한 음식이면 괜찮으십니더.",
-                "간단한 음식이 괜찮겠심더.",
+                "간단한 음식이 좋겠네예.",
+                "간단한 음식이면 괜찮지예.",
+                "간단한 음식이 좋을 것 같네예.",
             ],
         )
         self.assertEqual(errors, [])
 
-    def test_recognizes_honorific_sipnider(self):
-        self.assertEqual(
+    def test_rejects_nider_for_current_target_even_when_honorific(self):
+        self.assertIn(
+            "overdone_style",
             validate_candidate("따님 성함은 수진님이십니다.", "따님 성함은 수진님이십니더."),
-            [],
         )
+
+    def test_recognizes_observed_busan_connectives_and_requests(self):
+        for standard, candidate in [
+            ("권해 드립니다.", "권해 드립니더."),
+            ("신분증을 챙겨가세요.", "신분증을 챙겨가이소."),
+            ("준비해 두세요.", "준비해 두이소."),
+            ("그렇게 말씀하셨는데요.", "그렇게 말씀하셨는데예."),
+            ("보리차라고 하셨습니다.", "보리차라꼬 하셨습니다."),
+        ]:
+            self.assertNotIn(
+                "dialect_not_detected", validate_candidate(standard, candidate)
+            )
 
     def test_accepts_tv_and_television_as_same_latin_term(self):
         self.assertEqual(
@@ -77,6 +106,15 @@ class VertexGoldPilotTests(unittest.TestCase):
                 "확인해 보이소. 선택해 보이소. 알려주이소. 처리하겠습니더.",
             ),
         )
+        for awkward in (
+            "헷갈리시는 갑네요.",
+            "제가 인공지능이라가 확인을 못 합니다.",
+            "위로 밀쳐 올리이소.",
+            "확인해 보이시면 됩니다.",
+            "잡고 계셔보이소.",
+            "일정이 있습니다예.",
+        ):
+            self.assertIn("overdone_style", validate_candidate("확인하세요.", awkward))
 
     def test_rejects_changed_negation_question_and_critical_term(self):
         errors = validate_candidate(
@@ -92,6 +130,15 @@ class VertexGoldPilotTests(unittest.TestCase):
         self.assertIn(
             "intensifier_added",
             validate_candidate("먼저 신고하세요.", "무조건 먼저 신고하이소."),
+        )
+
+    def test_rejects_nider_for_current_target_voice(self):
+        self.assertIn(
+            "overdone_style",
+            validate_candidate(
+                "먼저 확인하세요.",
+                "먼저 확인하시면 됩니더.",
+            ),
         )
 
     def test_rejects_overdone_style(self):

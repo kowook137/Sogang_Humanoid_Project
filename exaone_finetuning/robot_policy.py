@@ -60,15 +60,15 @@ class RobotPolicy:
     def _safety_response(self, text: str) -> str | None:
         if any(term in text for term in EMERGENCY_TERMS):
             return (
-                "응급 상황일 수 있습니더. 혼자 해결하거나 직접 운전하지 말고 "
-                "바로 119에 신고하이소. 가능하면 안전한 곳에서 곁을 지키고, "
-                "상태가 더 나빠지는지 살펴보이소."
+                "응급 상황일 수 있습니다. 혼자 해결하거나 직접 운전하지 말고 "
+                "바로 119에 신고하세요. 가능하면 안전한 곳에서 곁을 지키고, "
+                "상태가 더 나빠지는지 살펴보세요."
             )
         if any(term in text for term in FALL_TERMS):
             return (
-                "바로 일으키지는 마이소. 먼저 의식과 호흡, 심한 출혈을 확인하고 "
-                "머리나 목, 허리 통증이 있는지 여쭤보이소. 의식이나 호흡이 "
-                "이상하거나 심하게 다친 것 같으면 움직이지 말고 119에 신고하이소."
+                "바로 일으키지 마세요. 먼저 의식과 호흡, 심한 출혈을 확인하고 "
+                "머리나 목, 허리 통증이 있는지 여쭤보세요. 의식이나 호흡이 "
+                "이상하거나 심하게 다친 것 같으면 움직이지 말고 119에 신고하세요."
             )
         return None
 
@@ -80,8 +80,8 @@ class RobotPolicy:
         if asks_weather:
             return self._sensor_or_unknown(
                 "weather",
-                "현재 위치와 실시간 날씨 정보가 연결되지 않아 확인할 수 없습니더. "
-                "확인되지 않은 날씨를 추측해서 말씀드리지는 않을게예.",
+                "현재 위치와 실시간 날씨 정보가 연결되지 않아 확인할 수 없습니다. "
+                "확인되지 않은 날씨를 추측해서 말씀드리지 않겠습니다.",
             )
 
         asks_temperature = (
@@ -92,15 +92,15 @@ class RobotPolicy:
             return self._sensor_or_unknown(
                 "temperature",
                 "온도 센서 값과 측정 시각이 들어오지 않아 현재 실내 온도는 "
-                "알 수 없습니더.",
+                "알 수 없습니다.",
             )
 
         asks_vision = any(term in text for term in ("봤어요", "보이나요", "표정", "누가 지나"))
         if asks_vision:
             return self._sensor_or_unknown(
                 "vision",
-                "현재 카메라나 인식 결과가 연결되지 않아 확인할 수 없습니더. "
-                "보지 못한 상황을 봤다고 말씀드리지는 않을게예.",
+                "현재 카메라나 인식 결과가 연결되지 않아 확인할 수 없습니다. "
+                "보지 못한 상황을 봤다고 말씀드리지 않겠습니다.",
             )
         return None
 
@@ -110,7 +110,7 @@ class RobotPolicy:
             return PolicyResult(response=unknown, reason=f"missing_sensor:{name}")
         value, measured_at = reading
         return PolicyResult(
-            response=f"{measured_at}에 측정된 값은 {value}입니더.",
+            response=f"{measured_at}에 측정된 값은 {value}입니다.",
             reason=f"sensor:{name}",
         )
 
@@ -143,21 +143,21 @@ class RobotPolicy:
         parts = []
         if asks_name:
             parts.append(
-                f"이름은 {self.memory['name']}님입니더."
+                f"이름은 {self.memory['name']}님입니다."
                 if "name" in self.memory
-                else "현재 저장된 이름 정보가 없습니더."
+                else "현재 저장된 이름 정보가 없습니다."
             )
         if asks_destination:
             parts.append(
-                f"현재 목적지는 {self.memory['destination']}입니더."
+                f"현재 목적지는 {self.memory['destination']}입니다."
                 if "destination" in self.memory
-                else "현재 저장된 목적지 정보가 없습니더."
+                else "현재 저장된 목적지 정보가 없습니다."
             )
         if asks_schedule:
             parts.append(
-                f"기억한 일정은 ‘{self.memory['schedule']}’라고 하셨습니더."
+                f"기억한 일정은 ‘{self.memory['schedule']}’라고 하셨습니다."
                 if "schedule" in self.memory
-                else "현재 저장된 일정 정보가 없습니더."
+                else "현재 저장된 일정 정보가 없습니다."
             )
         return " ".join(parts) or None
 

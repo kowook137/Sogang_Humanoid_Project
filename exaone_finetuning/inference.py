@@ -12,13 +12,9 @@ from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from chat_session import ChatSession, find_session, list_sessions
-from dialect_style import (
-    build_rewrite_messages,
-    clean_rewrite,
-    rewrite_is_safe,
-    style_gyeongsang,
-)
+from busan_style_renderer import render as render_busan
 from robot_policy import RobotPolicy
+from tts_queue import TTSQueue
 
 
 DEFAULT_MODEL_ID = "LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct"
@@ -27,9 +23,10 @@ MODULE_DIR = Path(__file__).resolve().parent
 DEFAULT_ADAPTER_PATH = MODULE_DIR / "exaone-4.0-1.2b-finetuned"
 DEFAULT_LOG_ROOT = MODULE_DIR / "chat_logs"
 DEFAULT_SYSTEM_PROMPT_PATH = MODULE_DIR / "system_prompt.txt"
-DIALECTS = ("standard", "gyeongsang", "jeolla", "chungcheong")
+DIALECTS = ("standard", "busan", "gyeongsang", "jeolla", "chungcheong")
 DIALECT_PROMPTS = {
     "standard": DEFAULT_SYSTEM_PROMPT_PATH,
+    "busan": MODULE_DIR / "prompts" / "busan.txt",
     "gyeongsang": MODULE_DIR / "prompts" / "gyeongsang.txt",
     "jeolla": MODULE_DIR / "prompts" / "jeolla.txt",
     "chungcheong": MODULE_DIR / "prompts" / "chungcheong.txt",
@@ -50,6 +47,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--load-session", help="Session ID or unique session ID prefix")
+    parser.add_argument(
+        "--tts-queue",
+        type=Path,
+        help="Append responses to a JSONL queue for a Busan-prosody TTS worker",
+    )
     return parser.parse_args()
 
 
@@ -144,6 +146,13 @@ def build_policy(messages: list[dict[str, str]]) -> RobotPolicy:
     return policy
 
 
+def apply_output_style(response: str, dialect: str) -> tuple[str, list[dict[str, str]]]:
+    """Apply only corpus-grounded text styling; TTS carries the main accent."""
+    if dialect not in {"busan", "gyeongsang"}:
+        return response.strip(), []
+    return render_busan(response, max_changes=1)
+
+
 def main() -> int:
     args = parse_args()
     if args.max_new_tokens < 1:
@@ -170,6 +179,7 @@ def main() -> int:
     runtime = ExaoneRuntime(
         args.model_id, args.revision, args.adapter_path, args.max_new_tokens
     )
+    tts_queue = TTSQueue(args.tts_queue) if args.tts_queue else None
     reasoning_mode = False
     print("-" * 60)
     print("EXAONE persistent multi-turn chat")
@@ -240,18 +250,14 @@ def main() -> int:
                 print(f"> Generation failed: {type(error).__name__}: {error!r}")
                 traceback.print_exc()
                 continue
-            if args.dialect == "gyeongsang":
-                try:
-                    rewritten = clean_rewrite(
-                        runtime.generate_response(build_rewrite_messages(response), False)
-                    )
-                    if rewrite_is_safe(response, rewritten):
-                        response = rewritten
-                except Exception:
-                    # The deterministic layer below still provides a safe fallback.
-                    pass
-                response = style_gyeongsang(response)
+        response, style_changes = apply_output_style(response, args.dialect)
         session.add_message("assistant", response, reasoning_mode)
+        if tts_queue is not None:
+            tts_queue.enqueue(
+                response,
+                session_id=session.session_id,
+                style_changes=style_changes,
+            )
         print(f"AI: {response}\n")
 
     print(f"대화 기록: {session.log_path}")

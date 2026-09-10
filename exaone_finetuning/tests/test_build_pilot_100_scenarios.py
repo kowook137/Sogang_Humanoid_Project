@@ -41,6 +41,17 @@ class Pilot100ScenarioTests(unittest.TestCase):
         self.assertTrue(all(len(row["messages"]) >= 3 for row in multi))
         self.assertTrue(all(row["messages"][-1]["role"] == "user" for row in records))
 
+    def test_historical_assistant_context_does_not_seed_old_dialect(self):
+        records = build_records()
+        assistant_text = "\n".join(
+            message["content"]
+            for row in records
+            for message in row["messages"][:-1]
+            if message["role"] == "assistant"
+        )
+        for form in ("습니더", "입니더", "주이소", "보이소", "드릴게예"):
+            self.assertNotIn(form, assistant_text)
+
 
 if __name__ == "__main__":
     unittest.main()

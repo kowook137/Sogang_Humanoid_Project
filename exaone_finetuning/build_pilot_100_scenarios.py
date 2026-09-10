@@ -142,6 +142,25 @@ def styled_user(text: str, index: int) -> tuple[str, str]:
     return "어... " + text.rstrip("?"), "mixed_or_noisy_spoken"
 
 
+def standardize_context_assistant(text: str) -> str:
+    """Keep historical assistant turns neutral while testing dialectal user input."""
+    replacements = (
+        ("습니더", "습니다"),
+        ("입니더", "입니다"),
+        ("드릴게예", "드릴게요"),
+        ("둘게예", "둘게요"),
+        ("할게예", "할게요"),
+        ("군예", "군요"),
+        ("네예", "네요"),
+        ("가예?", "가요?"),
+        ("주이소", "주세요"),
+        ("보이소", "보세요"),
+    )
+    for source, target in replacements:
+        text = text.replace(source, target)
+    return text
+
+
 def build_records() -> list[dict]:
     records = []
 
@@ -150,6 +169,9 @@ def build_records() -> list[dict]:
         final = messages[-1]
         styled, input_style = styled_user(final["content"], index)
         messages = [dict(message) for message in messages]
+        for message in messages[:-1]:
+            if message.get("role") == "assistant":
+                message["content"] = standardize_context_assistant(message["content"])
         messages[-1]["content"] = styled
         records.append(
             {

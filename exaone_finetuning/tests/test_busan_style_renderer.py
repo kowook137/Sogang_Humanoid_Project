@@ -1,6 +1,9 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
-from exaone_finetuning.busan_style_renderer import render
+from exaone_finetuning.busan_style_renderer import convert_standard_jsonl, render
 
 
 class BusanStyleRendererTests(unittest.TestCase):
@@ -28,6 +31,26 @@ class BusanStyleRendererTests(unittest.TestCase):
     def test_does_not_replace_inside_a_word(self):
         text = "하세요체라는 표현을 설명합니다."
         self.assertEqual(render(text), (text, []))
+
+    def test_converts_standard_answer_jsonl(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "standard.jsonl"
+            target = root / "busan.jsonl"
+            source.write_text(
+                json.dumps(
+                    {"id": "x1", "standard_answer": "다시 확인해 보세요."},
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                convert_standard_jsonl(source, target),
+                {"rows": 1, "changed": 1, "unchanged": 0},
+            )
+            row = json.loads(target.read_text(encoding="utf-8"))
+            self.assertEqual(row["busan_answer"], "다시 확인해 보이소.")
 
 
 if __name__ == "__main__":

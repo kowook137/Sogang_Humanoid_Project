@@ -116,16 +116,46 @@ def convert_review_csv(input_path: Path, output_path: Path) -> dict[str, int]:
     return {"rows": len(rows), "changed": changed, "unchanged": len(rows) - changed}
 
 
+def convert_standard_jsonl(input_path: Path, output_path: Path) -> dict[str, int]:
+    """Apply the same grounded renderer to a Vertex standard-answer batch."""
+    with input_path.open(encoding="utf-8") as source:
+        rows = [json.loads(line) for line in source if line.strip()]
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    changed = 0
+    with output_path.open("w", encoding="utf-8") as stream:
+        for row in rows:
+            standard = str(row.get("standard_answer", "")).strip()
+            styled, changes = render(standard)
+            changed += bool(changes)
+            result = dict(row)
+            result.update(
+                {
+                    "busan_answer": styled,
+                    "changed": bool(changes),
+                    "applied_changes": changes,
+                    "status": "review_required",
+                }
+            )
+            stream.write(json.dumps(result, ensure_ascii=False) + "\n")
+    return {"rows": len(rows), "changed": changed, "unchanged": len(rows) - changed}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input-csv", type=Path, required=True)
+    inputs = parser.add_mutually_exclusive_group(required=True)
+    inputs.add_argument("--input-csv", type=Path)
+    inputs.add_argument("--input-jsonl", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
 
 
 def main() -> None:
     options = parse_args()
-    print(json.dumps(convert_review_csv(options.input_csv, options.output), ensure_ascii=False))
+    if options.input_csv:
+        summary = convert_review_csv(options.input_csv, options.output)
+    else:
+        summary = convert_standard_jsonl(options.input_jsonl, options.output)
+    print(json.dumps(summary, ensure_ascii=False))
 
 
 if __name__ == "__main__":

@@ -5,6 +5,8 @@ labels.csv
 participants.csv
 outputs/
 tmp/
+exaone_finetuning/chat_logs/
+exaone_finetuning/data/processed/
 
 # Downloaded OpenPose Windows binaries and generated build files
 openpose/openpose-portable/

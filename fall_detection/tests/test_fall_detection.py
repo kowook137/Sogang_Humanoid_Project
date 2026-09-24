@@ -74,6 +74,10 @@ class KeypointTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Device must be"):
             resolve_device("gpu")
 
+    def test_pose_helpers_do_not_import_heavy_inference_dependencies(self) -> None:
+        self.assertNotIn("torch", sys.modules)
+        self.assertNotIn("ultralytics", sys.modules)
+
     def test_synthetic_fall_reaches_fallen_state(self) -> None:
         keypoints = np.full((60, 25, 3), np.nan, dtype=np.float32)
         keypoints[:, :, 2] = 0.0

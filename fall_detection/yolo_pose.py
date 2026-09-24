@@ -15,8 +15,6 @@ os.environ.setdefault("MPLCONFIGDIR", str(_TEMP_DIR / "matplotlib"))
 
 import cv2
 import numpy as np
-import torch
-from ultralytics import YOLO
 
 from detector import FallState, detect_fall
 from features import extract_features
@@ -55,12 +53,16 @@ def resolve_device(requested: str) -> str:
     """Resolve auto/CPU/CUDA selection and fail early for an unavailable GPU."""
     normalized = requested.strip().lower()
     if normalized == "auto":
+        import torch
+
         return "0" if torch.cuda.is_available() else "cpu"
     if normalized == "cpu":
         return "cpu"
     if normalized.startswith("cuda:"):
         normalized = normalized.split(":", 1)[1]
     if normalized.isdecimal():
+        import torch
+
         if not torch.cuda.is_available():
             raise RuntimeError(
                 "CUDA device was requested but PyTorch cannot access a GPU. "
@@ -129,6 +131,9 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    import torch
+    from ultralytics import YOLO
+
     args = parse_args()
     source = parse_source(args.source)
     device = resolve_device(args.device)

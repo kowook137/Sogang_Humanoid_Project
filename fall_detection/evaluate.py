@@ -56,6 +56,13 @@ def render_result(source: Path, destination: Path, features: PoseFeatures, state
         ok, frame = capture.read()
         if not ok:
             break
+        if index >= len(states):
+            capture.release()
+            writer.release()
+            destination.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"Result video has more frames than detector output ({len(states)})"
+            )
         state = FallState(int(states[index]))
         color = STATE_COLORS[state]
         cv2.rectangle(frame, (12, 12), (465, 118), (0, 0, 0), -1)
@@ -79,6 +86,7 @@ def render_result(source: Path, destination: Path, features: PoseFeatures, state
     capture.release()
     writer.release()
     if index != len(states):
+        destination.unlink(missing_ok=True)
         raise RuntimeError(f"Rendered {index} frames but expected {len(states)}")
 
 

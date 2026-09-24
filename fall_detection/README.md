@@ -261,6 +261,7 @@ C920을 WSL USB/IP로 사용할 때 기본 YUYV 스트림은 timeout이 발생�
 테스트는 실제 OpenPose나 카메라 없이 실행할 수 있다.
 
 ```bash
+python -m pip install -r fall_detection/requirements-test.txt
 python -m unittest discover -s fall_detection/tests -v
 ```
 

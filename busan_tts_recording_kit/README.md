@@ -19,4 +19,8 @@
 
 GPU 컴퓨터에서 기준 음성 zero-shot 합성 → 50개 녹음의 잡음·전사 검수 → GPT-SoVITS few-shot 미세조정 → 비교 문장 20개 합성 순서로 진행합니다. 아직 개인 음성 녹음이나 학습 결과는 없습니다.
 
+연구실 GPU에서는 [`LAB_QUICKSTART.md`](LAB_QUICKSTART.md)만 따라가세요.
+환경 확인, 공식 버전 설치, 학습 목록 변환, WebUI 실행, 녹음 푸시와 대용량
+학습 결과의 GitHub Release 백업을 `lab_tts.sh`의 한 줄 명령들로 통합했습니다.
+
 저장소의 `LAB_GPU_HANDOFF.md`에는 GPU 컴퓨터의 우선 점검 지침이 있습니다. 작업 재개 시 Codex 대화는 `codex resume --all`로 찾을 수 있습니다.

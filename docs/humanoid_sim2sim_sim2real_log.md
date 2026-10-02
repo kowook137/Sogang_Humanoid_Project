@@ -419,3 +419,52 @@ The current PR represents a stable **Sim2Sim locomotion baseline and Sim2Real pr
 - Accept the current `0.45 m/s` gait as the nominal Sim2Sim baseline.
 - Keep lightweight contact-based gait diagnostics.
 - Proceed to Sim2Real robustness testing rather than further nominal-gait tuning.
+
+---
+
+### 2026-10-02 — Floor-friction robustness validation
+
+**Goal**
+- Evaluate sensitivity of the nominal walking policy to foot-ground friction changes before hardware deployment.
+
+**Method**
+- Added runtime MuJoCo friction scaling without modifying the source MJCF.
+- Evaluated three conditions at the nominal `0.45 m/s` command:
+  - low: `0.5x`
+  - nominal: `1.0x`
+  - high: `1.5x`
+- Compared forward velocity, path tracking, orientation error, gait timing, stride length, foot clearance, and left/right gait symmetry.
+
+**Result**
+- Nominal (`1.0x`):
+  - forward velocity: approximately `0.400 m/s`
+  - cross-track RMS: approximately `0.103 m`
+  - yaw-error RMS: approximately `4.38 deg`
+  - stride length: approximately `20.1 cm`
+  - stride-length asymmetry: approximately `2.0%`
+
+- Low friction (`0.5x`):
+  - forward velocity decreased to approximately `0.382 m/s`
+  - cross-track RMS increased to approximately `0.154 m`
+  - yaw-error RMS increased to approximately `6.99 deg`
+  - stride length decreased to approximately `17.0 cm`
+  - mean stride-length asymmetry increased to approximately `12.4%`
+  - transient stride asymmetry exceeded `50%`
+  - locomotion continued without falling, but nominal tracking and gait symmetry were not maintained.
+
+- High friction (`1.5x`):
+  - forward velocity increased to approximately `0.434 m/s`
+  - cross-track RMS decreased to approximately `0.082 m`
+  - yaw-error RMS decreased to approximately `2.70 deg`
+  - stride length increased to approximately `24.8 cm`
+  - stride-length asymmetry decreased to approximately `0.3%`
+
+**Interpretation**
+- The policy remains stable over substantial friction variation, but low-friction conditions produce significant path-tracking and gait-symmetry degradation.
+- Higher friction shifts the locomotion system toward a longer-stride, slower-cadence gait while maintaining stable left/right symmetry.
+- Aggregate leg torque saturation remained approximately `16–17%` across all three conditions, indicating that the low-friction degradation was not accompanied by increased actuator clipping.
+
+**Engineering decision**
+- Accept the friction test as sufficient for the current Sim2Real preparation stage.
+- Treat low-friction surfaces as a hardware validation risk.
+- Proceed to actuator-delay robustness testing.

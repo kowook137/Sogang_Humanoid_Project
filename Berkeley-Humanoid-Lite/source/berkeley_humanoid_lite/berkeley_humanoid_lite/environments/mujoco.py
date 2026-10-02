@@ -1,4 +1,5 @@
 
+import os
 import time
 import threading
 import tempfile
@@ -282,6 +283,53 @@ class MujocoSimulator(MujocoEnv):
                 self._ground_geom_id,
                 2,
             ]
+        )
+
+        # Optional Sim2Real friction robustness test.
+        # Scale the existing MuJoCo friction values for the ground
+        # and both foot collision geoms without modifying the MJCF.
+        self._friction_scale = float(
+            os.environ.get(
+                "BHL_FRICTION_SCALE",
+                "1.0",
+            )
+        )
+
+        if self._friction_scale <= 0.0:
+            raise ValueError(
+                "BHL_FRICTION_SCALE must be positive"
+            )
+
+        friction_geom_ids = [
+            self._ground_geom_id,
+            self._foot_geom_ids["L"],
+            self._foot_geom_ids["R"],
+        ]
+
+        self._nominal_friction = {
+            geom_id: self.mj_model.geom_friction[
+                geom_id
+            ].copy()
+            for geom_id in friction_geom_ids
+        }
+
+        for geom_id in friction_geom_ids:
+            self.mj_model.geom_friction[
+                geom_id
+            ] = (
+                self._nominal_friction[geom_id]
+                * self._friction_scale
+            )
+
+        print(
+            "Friction robustness: "
+            f"scale={self._friction_scale:.2f}, "
+            f"ground="
+            f"{self.mj_model.geom_friction[self._ground_geom_id]}, "
+            f"L foot="
+            f"{self.mj_model.geom_friction[self._foot_geom_ids['L']]}, "
+            f"R foot="
+            f"{self.mj_model.geom_friction[self._foot_geom_ids['R']]}"
         )
 
         print(

@@ -579,3 +579,70 @@ The current PR represents a stable **Sim2Sim locomotion baseline and Sim2Real pr
 - Observation noise is not currently a dominant Sim2Real risk compared with action latency.
 - Keep the runtime noise injection option for future testing.
 - Prioritize dynamics mismatch and real hardware latency validation.
+
+---
+
+### 2026-10-02 — Mass/inertia robustness validation
+
+**Goal**
+- Evaluate sensitivity of the walking policy to rigid-body dynamics mismatch before hardware deployment.
+
+**Method**
+- Uniformly scaled MuJoCo body mass and inertia while keeping:
+  - geometry unchanged
+  - friction at `1.0x`
+  - action delay at `0 ms`
+  - observation noise at `0x`
+  - PD gains unchanged
+  - torque limits unchanged
+- Tested:
+  - `0.9x`: `14.698 kg`
+  - `1.0x`: `16.331 kg`
+  - `1.1x`: `17.964 kg`
+
+**Result**
+- `0.9x`:
+  - forward velocity: approximately `0.443 m/s`
+  - cross-track RMS: approximately `0.134 m`
+  - yaw-error RMS: approximately `6.48 deg`
+  - leg-torque RMS: approximately `3.29 Nm`
+  - torque saturation: approximately `13.9%`
+  - step length: approximately `12.2 cm`
+  - stride length: approximately `24.7 cm`
+  - stable walking maintained.
+
+- `1.0x`:
+  - forward velocity: approximately `0.402 m/s`
+  - cross-track RMS: approximately `0.103 m`
+  - yaw-error RMS: approximately `4.15 deg`
+  - leg-torque RMS: approximately `3.34 Nm`
+  - torque saturation: approximately `16.3%`
+  - step length: approximately `10.2 cm`
+  - stride length: approximately `20.5 cm`
+  - stable nominal walking maintained.
+
+- `1.1x`:
+  - forward velocity: approximately `0.370 m/s`
+  - cross-track RMS: approximately `0.091 m`
+  - yaw-error RMS: approximately `3.56 deg`
+  - leg-torque RMS: approximately `3.46 Nm`
+  - torque saturation: approximately `19.9%`
+  - step length: approximately `8.9 cm`
+  - stride length: approximately `17.8 cm`
+  - stable walking maintained.
+
+**Interpretation**
+- The current policy tolerates uniform `±10%` mass/inertia mismatch without falling.
+- Lower mass shifts the system toward a longer-stride, slower-cadence and faster gait, but path/yaw tracking becomes less consistent.
+- Higher mass shifts the system toward a shorter-stride, higher-cadence and slower gait.
+- Increasing mass raises actuator loading and torque-saturation duty even though the applied torque limit remains fixed at `6 Nm`.
+- The apparent improvement in some path metrics at `1.1x` should not be interpreted as superior control performance because the locomotion limit cycle also changed.
+
+**Limitation**
+- This test scales all body masses and inertias uniformly.
+- It does not evaluate center-of-mass offsets, limb-specific mass errors, or independent inertia-tensor mismatch.
+
+**Engineering decision**
+- Accept uniform `±10%` dynamics mismatch as stable for the current Sim2Sim baseline.
+- Keep actuator torque margin as a hardware validation item.
+- Treat end-to-end action latency as the dominant Sim2Real risk identified in the current robustness suite.

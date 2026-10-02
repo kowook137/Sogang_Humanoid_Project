@@ -165,6 +165,57 @@ class MujocoSimulator(MujocoEnv):
         super().__init__(cfg)
         self.physics_substeps = int(np.round(self.cfg.policy_dt / self.cfg.physics_dt))
 
+        # Optional Sim2Real rigid-body dynamics mismatch test.
+        # This uniformly scales robot body masses and inertias while
+        # keeping geometry, friction, controller gains, and torque
+        # limits unchanged.
+        self._dynamics_mass_scale = float(
+            os.environ.get(
+                "BHL_DYNAMICS_MASS_SCALE",
+                "1.0",
+            )
+        )
+
+        if self._dynamics_mass_scale <= 0.0:
+            raise ValueError(
+                "BHL_DYNAMICS_MASS_SCALE must be positive"
+            )
+
+        self._nominal_total_mass = float(
+            mujoco.mj_getTotalmass(
+                self.mj_model
+            )
+        )
+
+        self._scaled_total_mass = (
+            self._nominal_total_mass
+            * self._dynamics_mass_scale
+        )
+
+        if abs(
+            self._dynamics_mass_scale - 1.0
+        ) > 1.0e-12:
+            mujoco.mj_setTotalmass(
+                self.mj_model,
+                self._scaled_total_mass,
+            )
+
+            # Recompute model constants derived from mass/inertia.
+            mujoco.mj_setConst(
+                self.mj_model,
+                self.mj_data,
+            )
+
+        print(
+            "Dynamics robustness: "
+            f"mass/inertia scale="
+            f"{self._dynamics_mass_scale:.2f}, "
+            f"nominal mass="
+            f"{self._nominal_total_mass:.3f} kg, "
+            f"effective mass="
+            f"{float(mujoco.mj_getTotalmass(self.mj_model)):.3f} kg"
+        )
+
         # Initialize simulation parameters
         self.sensordata_dof_size = 3 * self.mj_model.nu
         self.gravity_vector = torch.tensor([0.0, 0.0, -1.0])

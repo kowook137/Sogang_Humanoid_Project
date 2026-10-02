@@ -468,3 +468,56 @@ The current PR represents a stable **Sim2Sim locomotion baseline and Sim2Real pr
 - Accept the friction test as sufficient for the current Sim2Real preparation stage.
 - Treat low-friction surfaces as a hardware validation risk.
 - Proceed to actuator-delay robustness testing.
+
+---
+
+### 2026-10-02 — Action-delay robustness validation
+
+**Goal**
+- Evaluate locomotion sensitivity to control latency before hardware deployment.
+
+**Method**
+- Added runtime policy-action delay using a discrete FIFO queue.
+- Policy frequency was 25 Hz, corresponding to a 40 ms action period.
+- Tested:
+  - `0 ms` / 0 policy steps
+  - `40 ms` / 1 policy step
+  - `80 ms` / 2 policy steps
+- Floor friction remained at the nominal `1.0x` condition.
+
+**Result**
+- `0 ms`:
+  - sustained stable locomotion
+  - mean forward velocity approximately `0.402 m/s`
+  - forward-velocity std approximately `0.206 m/s`
+  - path-lateral RMS approximately `0.136 m/s`
+  - roll/pitch RMS approximately `1.20 / 1.78 deg`
+  - leg-torque saturation approximately `16.6%`
+
+- `40 ms`:
+  - locomotion initially continued, but sustained stability was lost
+  - pre-failure mean forward velocity approximately `0.435 m/s`
+  - forward-velocity std increased to approximately `0.814 m/s`
+  - path-lateral RMS increased to approximately `0.450 m/s`
+  - roll/pitch RMS increased to approximately `2.74 / 3.62 deg`
+  - leg-torque saturation increased to approximately `22.7%`
+  - stride length increased to approximately `27 cm`
+  - gait asymmetry increased
+  - catastrophic orientation loss occurred after roughly 10–15 s of walking.
+
+- `80 ms`:
+  - stable walking gait was not established
+  - large orientation errors appeared almost immediately
+  - torque saturation increased to approximately `50%`
+  - the robot rapidly lost balance.
+
+**Interpretation**
+- The current locomotion policy is substantially more sensitive to action latency than to the tested friction variation.
+- A one-policy-step (`40 ms`) delay is already outside the sustained-stability region for the current controller.
+- The exact latency stability boundary cannot be determined from this discrete 25 Hz delay test because the delay is quantized in 40 ms increments.
+
+**Engineering decision**
+- Treat end-to-end control latency as a major Sim2Real risk.
+- Keep the runtime delay test for future controller validation.
+- Measure actual inference, communication, motor-controller, and actuator latency on hardware.
+- If necessary, perform finer sub-policy-period delay testing or retraining with latency randomization.

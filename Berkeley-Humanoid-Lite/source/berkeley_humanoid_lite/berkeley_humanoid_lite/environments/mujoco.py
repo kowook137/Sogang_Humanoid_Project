@@ -180,9 +180,50 @@ class MujocoSimulator(MujocoEnv):
 
         self.n_steps = 0
 
+        # Optional Sim2Real actuator / command-delay robustness test.
+        # Delay is quantized to the 25 Hz policy period.
+        self._action_delay_ms_requested = float(
+            os.environ.get(
+                "BHL_ACTION_DELAY_MS",
+                "0",
+            )
+        )
+
+        if self._action_delay_ms_requested < 0.0:
+            raise ValueError(
+                "BHL_ACTION_DELAY_MS must be non-negative"
+            )
+
+        self._action_delay_steps = int(
+            round(
+                (
+                    self._action_delay_ms_requested
+                    / 1000.0
+                )
+                / self.cfg.policy_dt
+            )
+        )
+
+        self._action_delay_ms_effective = (
+            self._action_delay_steps
+            * self.cfg.policy_dt
+            * 1000.0
+        )
+
+        self._action_delay_queue = deque()
+
         print("Policy frequency: ", 1 / self.cfg.policy_dt)
         print("Physics frequency: ", 1 / self.cfg.physics_dt)
         print("Physics substeps: ", self.physics_substeps)
+        print(
+            "Action delay robustness: "
+            f"requested="
+            f"{self._action_delay_ms_requested:.1f} ms, "
+            f"effective="
+            f"{self._action_delay_ms_effective:.1f} ms, "
+            f"policy steps="
+            f"{self._action_delay_steps}"
+        )
 
         # Initialize control mode and command variables
         self.is_killed = threading.Event()
@@ -398,6 +439,7 @@ class MujocoSimulator(MujocoEnv):
         self.mj_data.qpos[3:7] = torch.tensor([1.0, 0.0, 0.0, 0.0])  # Default quaternion orientation
         self.mj_data.qpos[7:] = self.cfg.default_joint_positions
         self.mj_data.qvel[:] = 0
+        self._action_delay_queue.clear()
 
         # The reset quaternion is the commanded straight-ahead direction.
         self._heading_reference_yaw = self._get_heading_yaw()
@@ -425,8 +467,12 @@ class MujocoSimulator(MujocoEnv):
         """
         step_start_time = time.perf_counter()
 
+        actions_to_apply = self._get_delayed_actions(
+            actions
+        )
+
         for _ in range(self.physics_substeps):
-            self._apply_actions(actions)
+            self._apply_actions(actions_to_apply)
             mujoco.mj_step(self.mj_model, self.mj_data)
 
         self.mj_viewer.sync()
@@ -443,6 +489,34 @@ class MujocoSimulator(MujocoEnv):
         self._update_contact_gait_metrics()
         self._maybe_log_gait_diagnostics()
         return observations
+
+    def _get_delayed_actions(
+        self,
+        actions: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return policy actions after an optional discrete delay."""
+
+        current_actions = actions.detach().clone()
+
+        if self._action_delay_steps <= 0:
+            return current_actions
+
+        # Warm-start the delay line with the first command rather
+        # than zero joint targets. This avoids introducing an
+        # artificial initialization transient unrelated to delay.
+        if not self._action_delay_queue:
+            for _ in range(
+                self._action_delay_steps
+            ):
+                self._action_delay_queue.append(
+                    current_actions.clone()
+                )
+
+        self._action_delay_queue.append(
+            current_actions
+        )
+
+        return self._action_delay_queue.popleft()
 
     def _apply_actions(self, actions: torch.Tensor):
         """Apply control actions to the robot.

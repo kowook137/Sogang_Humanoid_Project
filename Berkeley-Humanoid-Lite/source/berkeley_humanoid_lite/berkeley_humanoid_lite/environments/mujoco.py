@@ -3,6 +3,7 @@ import time
 import threading
 import tempfile
 from pathlib import Path
+from collections import deque
 
 import numpy as np
 import torch
@@ -272,8 +273,15 @@ class MujocoSimulator(MujocoEnv):
         if not plane_geoms:
             raise RuntimeError("Could not find ground plane")
 
+        self._ground_geom_id = int(
+            plane_geoms[0]
+        )
+
         self._ground_z = float(
-            self.mj_model.geom_pos[plane_geoms[0], 2]
+            self.mj_model.geom_pos[
+                self._ground_geom_id,
+                2,
+            ]
         )
 
         print(
@@ -284,6 +292,8 @@ class MujocoSimulator(MujocoEnv):
         )
 
         self._reset_foot_metric_window()
+        self._reset_benchmark_window()
+        self._initialize_contact_gait_metrics()
 
         # Hold the direction captured when straight walking begins.
         self._heading_hold_enabled = self.cfg.num_actions == 12
@@ -347,6 +357,12 @@ class MujocoSimulator(MujocoEnv):
         self._cross_track_error = 0.0
         self._path_lateral_command = 0.0
 
+        if hasattr(
+            self,
+            "_gait_walk_initialized",
+        ):
+            self._reset_contact_gait_metrics()
+
         observations = self._get_observations()
         return observations
 
@@ -375,6 +391,8 @@ class MujocoSimulator(MujocoEnv):
 
         self.n_steps += 1
         self._update_foot_metrics()
+        self._update_benchmark_metrics()
+        self._update_contact_gait_metrics()
         self._maybe_log_gait_diagnostics()
         return observations
 
@@ -393,10 +411,16 @@ class MujocoSimulator(MujocoEnv):
         output_torques = self.joint_kp * (target_positions - self._get_joint_pos()) + \
             self.joint_kd * (-self._get_joint_vel())
 
-        # Apply EMA filtering and torque limits
-        output_torques_clipped = torch.clip(output_torques, -self.effort_limits, self.effort_limits)
+        # Apply torque limits.
+        output_torques_clipped = torch.clip(
+            output_torques,
+            -self.effort_limits,
+            self.effort_limits,
+        )
 
-        self.mj_data.ctrl[:] = output_torques_clipped.numpy()
+        self.mj_data.ctrl[:] = (
+            output_torques_clipped.numpy()
+        )
 
     def _get_base_pos(self) -> torch.Tensor:
         """Get base position of the robot.
@@ -774,6 +798,481 @@ class MujocoSimulator(MujocoEnv):
 
         self._foot_metric_samples += 1
 
+    def _reset_benchmark_window(self) -> None:
+        """Reset interval statistics used for gait benchmarking."""
+        self._benchmark_forward_velocity = []
+        self._benchmark_path_lateral_velocity = []
+        self._benchmark_cross_track = []
+        self._benchmark_yaw_error = []
+        self._benchmark_roll = []
+        self._benchmark_pitch = []
+
+        self._benchmark_leg_torque_sq_sum = 0.0
+        self._benchmark_leg_torque_count = 0
+        self._benchmark_leg_torque_peak = 0.0
+        self._benchmark_leg_saturation_count = 0
+        self._benchmark_leg_saturation_total = 0
+
+        self._benchmark_samples = 0
+
+    def _update_benchmark_metrics(self) -> None:
+        """Accumulate quantitative walking metrics at the policy rate."""
+
+        # Do not mix standing data into walking benchmarks.
+        if abs(self._requested_velocity_x) < 0.29:
+            self._reset_benchmark_window()
+            return
+
+        world_velocity = np.asarray(
+            self.mj_data.qvel[0:3],
+            dtype=float,
+        )
+
+        base_quat = torch.as_tensor(
+            self.mj_data.qpos[3:7],
+            dtype=torch.float32,
+        )
+
+        body_velocity = quat_rotate_inverse(
+            base_quat,
+            torch.as_tensor(
+                world_velocity,
+                dtype=torch.float32,
+            ),
+        )
+
+        self._benchmark_forward_velocity.append(
+            float(body_velocity[0])
+        )
+
+        # Lateral velocity relative to the original reference path,
+        # not relative to the robot's instantaneous body heading.
+        path_yaw = self._heading_reference_yaw
+        left_direction = np.array(
+            [-np.sin(path_yaw), np.cos(path_yaw)],
+            dtype=float,
+        )
+
+        path_lateral_velocity = float(
+            np.dot(
+                world_velocity[0:2],
+                left_direction,
+            )
+        )
+
+        self._benchmark_path_lateral_velocity.append(
+            path_lateral_velocity
+        )
+
+        self._benchmark_cross_track.append(
+            float(self._cross_track_error)
+        )
+
+        self._benchmark_yaw_error.append(
+            float(self._heading_error)
+        )
+
+        quat_w, quat_x, quat_y, quat_z = (
+            float(value)
+            for value in self.mj_data.qpos[3:7]
+        )
+
+        roll = float(
+            np.arctan2(
+                2.0
+                * (
+                    quat_w * quat_x
+                    + quat_y * quat_z
+                ),
+                1.0
+                - 2.0
+                * (
+                    quat_x ** 2
+                    + quat_y ** 2
+                ),
+            )
+        )
+
+        sin_pitch = (
+            2.0
+            * (
+                quat_w * quat_y
+                - quat_z * quat_x
+            )
+        )
+
+        pitch = float(
+            np.arcsin(
+                np.clip(
+                    sin_pitch,
+                    -1.0,
+                    1.0,
+                )
+            )
+        )
+
+        self._benchmark_roll.append(roll)
+        self._benchmark_pitch.append(pitch)
+
+        # Leg torque statistics.
+        action_indices = np.asarray(
+            self.cfg.action_indices,
+            dtype=int,
+        )
+
+        leg_torques = np.asarray(
+            self.mj_data.ctrl,
+            dtype=float,
+        )[action_indices]
+
+        leg_limits = (
+            self.effort_limits[
+                self.cfg.action_indices
+            ]
+            .detach()
+            .cpu()
+            .numpy()
+        )
+
+        self._benchmark_leg_torque_sq_sum += float(
+            np.sum(leg_torques ** 2)
+        )
+
+        self._benchmark_leg_torque_count += int(
+            leg_torques.size
+        )
+
+        self._benchmark_leg_torque_peak = max(
+            self._benchmark_leg_torque_peak,
+            float(
+                np.max(
+                    np.abs(leg_torques)
+                )
+            ),
+        )
+
+        valid_limits = leg_limits > 1.0e-6
+
+        if np.any(valid_limits):
+            saturated = (
+                np.abs(leg_torques)
+                >= (leg_limits - 1.0e-6)
+            ) & valid_limits
+
+            self._benchmark_leg_saturation_count += int(
+                np.count_nonzero(saturated)
+            )
+
+            self._benchmark_leg_saturation_total += int(
+                np.count_nonzero(valid_limits)
+            )
+
+        self._benchmark_samples += 1
+
+    def _initialize_contact_gait_metrics(self) -> None:
+        """Initialize lightweight foot-contact gait analysis."""
+
+        self._gait_contact_state = {
+            "L": False,
+            "R": False,
+        }
+
+        self._gait_walk_initialized = False
+
+        self._gait_last_touchdown_time = {
+            "L": None,
+            "R": None,
+        }
+
+        self._gait_last_touchdown_xy = {
+            "L": None,
+            "R": None,
+        }
+
+        self._gait_last_liftoff_time = {
+            "L": None,
+            "R": None,
+        }
+
+        self._gait_last_any_touchdown_time = None
+        self._gait_last_any_touchdown_xy = None
+        self._gait_last_any_touchdown_side = None
+
+        self._gait_step_times = deque(maxlen=8)
+        self._gait_step_lengths = deque(maxlen=8)
+
+        self._gait_stride_times = {
+            "L": deque(maxlen=6),
+            "R": deque(maxlen=6),
+        }
+
+        self._gait_stride_lengths = {
+            "L": deque(maxlen=6),
+            "R": deque(maxlen=6),
+        }
+
+        self._gait_stance_times = {
+            "L": deque(maxlen=6),
+            "R": deque(maxlen=6),
+        }
+
+        self._gait_swing_times = {
+            "L": deque(maxlen=6),
+            "R": deque(maxlen=6),
+        }
+
+    def _reset_contact_gait_metrics(self) -> None:
+        """Reset gait history when walking stops."""
+        self._initialize_contact_gait_metrics()
+
+    def _foot_ground_contact(self, side: str) -> bool:
+        """Return whether a foot collision box contacts the ground."""
+
+        foot_geom_id = self._foot_geom_ids[side]
+
+        for contact_index in range(self.mj_data.ncon):
+            contact = self.mj_data.contact[contact_index]
+
+            geom1 = int(contact.geom1)
+            geom2 = int(contact.geom2)
+
+            if (
+                (
+                    geom1 == foot_geom_id
+                    and geom2 == self._ground_geom_id
+                )
+                or (
+                    geom2 == foot_geom_id
+                    and geom1 == self._ground_geom_id
+                )
+            ):
+                return True
+
+        return False
+
+    def _update_contact_gait_metrics(self) -> None:
+        """Detect touchdown/liftoff events at the 25 Hz policy rate."""
+
+        walking = abs(self._requested_velocity_x) >= 0.29
+
+        if not walking:
+            if self._gait_walk_initialized:
+                self._reset_contact_gait_metrics()
+            return
+
+        contacts = {
+            side: self._foot_ground_contact(side)
+            for side in ("L", "R")
+        }
+
+        # 첫 walking sample은 초기 contact 상태만 저장합니다.
+        if not self._gait_walk_initialized:
+            self._gait_contact_state = contacts
+            self._gait_walk_initialized = True
+            return
+
+        current_time = float(self.mj_data.time)
+
+        path_yaw = self._heading_reference_yaw
+
+        forward_direction = np.array(
+            [
+                np.cos(path_yaw),
+                np.sin(path_yaw),
+            ],
+            dtype=float,
+        )
+
+        for side in ("L", "R"):
+            previous_contact = self._gait_contact_state[side]
+            current_contact = contacts[side]
+
+            # Touchdown: no contact -> contact
+            if not previous_contact and current_contact:
+                foot_xy = np.asarray(
+                    self.mj_data.xpos[
+                        self._foot_body_ids[side],
+                        0:2,
+                    ],
+                    dtype=float,
+                ).copy()
+
+                previous_touchdown_time = (
+                    self._gait_last_touchdown_time[side]
+                )
+
+                previous_touchdown_xy = (
+                    self._gait_last_touchdown_xy[side]
+                )
+
+                # Same-foot stride time
+                if previous_touchdown_time is not None:
+                    stride_time = (
+                        current_time
+                        - previous_touchdown_time
+                    )
+
+                    if stride_time > 0.0:
+                        self._gait_stride_times[side].append(
+                            stride_time
+                        )
+
+                # Same-foot stride length
+                if previous_touchdown_xy is not None:
+                    stride_delta = (
+                        foot_xy
+                        - previous_touchdown_xy
+                    )
+
+                    stride_length = float(
+                        np.dot(
+                            stride_delta,
+                            forward_direction,
+                        )
+                    )
+
+                    self._gait_stride_lengths[side].append(
+                        stride_length
+                    )
+
+                # Swing time
+                previous_liftoff_time = (
+                    self._gait_last_liftoff_time[side]
+                )
+
+                if previous_liftoff_time is not None:
+                    swing_time = (
+                        current_time
+                        - previous_liftoff_time
+                    )
+
+                    if swing_time > 0.0:
+                        self._gait_swing_times[side].append(
+                            swing_time
+                        )
+
+                # Alternating touchdown = one step
+                if (
+                    self._gait_last_any_touchdown_time
+                    is not None
+                    and self._gait_last_any_touchdown_side
+                    != side
+                ):
+                    step_time = (
+                        current_time
+                        - self._gait_last_any_touchdown_time
+                    )
+
+                    if step_time > 0.0:
+                        self._gait_step_times.append(
+                            step_time
+                        )
+
+                    if (
+                        self._gait_last_any_touchdown_xy
+                        is not None
+                    ):
+                        step_delta = (
+                            foot_xy
+                            - self._gait_last_any_touchdown_xy
+                        )
+
+                        step_length = float(
+                            np.dot(
+                                step_delta,
+                                forward_direction,
+                            )
+                        )
+
+                        self._gait_step_lengths.append(
+                            step_length
+                        )
+
+                self._gait_last_touchdown_time[side] = (
+                    current_time
+                )
+
+                self._gait_last_touchdown_xy[side] = (
+                    foot_xy
+                )
+
+                self._gait_last_any_touchdown_time = (
+                    current_time
+                )
+
+                self._gait_last_any_touchdown_xy = (
+                    foot_xy
+                )
+
+                self._gait_last_any_touchdown_side = side
+
+            # Liftoff: contact -> no contact
+            elif previous_contact and not current_contact:
+                touchdown_time = (
+                    self._gait_last_touchdown_time[side]
+                )
+
+                if touchdown_time is not None:
+                    stance_time = (
+                        current_time
+                        - touchdown_time
+                    )
+
+                    if stance_time > 0.0:
+                        self._gait_stance_times[side].append(
+                            stance_time
+                        )
+
+                self._gait_last_liftoff_time[side] = (
+                    current_time
+                )
+
+            self._gait_contact_state[side] = (
+                current_contact
+            )
+
+    @staticmethod
+    def _recent_mean(values):
+        if not values:
+            return None
+
+        return float(
+            np.mean(
+                np.asarray(
+                    values,
+                    dtype=float,
+                )
+            )
+        )
+
+    @staticmethod
+    def _gait_asymmetry_percent(
+        left_value,
+        right_value,
+    ):
+        if (
+            left_value is None
+            or right_value is None
+        ):
+            return None
+
+        denominator = 0.5 * (
+            abs(left_value)
+            + abs(right_value)
+        )
+
+        if denominator < 1.0e-8:
+            return None
+
+        return (
+            100.0
+            * abs(
+                left_value
+                - right_value
+            )
+            / denominator
+        )
+
     def _maybe_log_gait_diagnostics(self) -> None:
         """Report actual speed and passive-arm loading every two seconds."""
         if (
@@ -872,6 +1371,256 @@ class MujocoSimulator(MujocoEnv):
         )
 
 
+        if self._benchmark_samples > 0:
+            forward_values = np.asarray(
+                self._benchmark_forward_velocity,
+                dtype=float,
+            )
+
+            lateral_values = np.asarray(
+                self._benchmark_path_lateral_velocity,
+                dtype=float,
+            )
+
+            cross_track_values = np.asarray(
+                self._benchmark_cross_track,
+                dtype=float,
+            )
+
+            yaw_error_values = np.asarray(
+                self._benchmark_yaw_error,
+                dtype=float,
+            )
+
+            roll_values = np.asarray(
+                self._benchmark_roll,
+                dtype=float,
+            )
+
+            pitch_values = np.asarray(
+                self._benchmark_pitch,
+                dtype=float,
+            )
+
+            forward_mean = float(
+                np.mean(forward_values)
+            )
+
+            forward_std = float(
+                np.std(forward_values)
+            )
+
+            forward_error = (
+                forward_mean
+                - self._requested_velocity_x
+            )
+
+            lateral_rms = float(
+                np.sqrt(
+                    np.mean(
+                        lateral_values ** 2
+                    )
+                )
+            )
+
+            cross_track_rms = float(
+                np.sqrt(
+                    np.mean(
+                        cross_track_values ** 2
+                    )
+                )
+            )
+
+            cross_track_max = float(
+                np.max(
+                    np.abs(
+                        cross_track_values
+                    )
+                )
+            )
+
+            yaw_error_rms = float(
+                np.sqrt(
+                    np.mean(
+                        yaw_error_values ** 2
+                    )
+                )
+            )
+
+            yaw_error_max = float(
+                np.max(
+                    np.abs(
+                        yaw_error_values
+                    )
+                )
+            )
+
+            roll_rms = float(
+                np.sqrt(
+                    np.mean(
+                        roll_values ** 2
+                    )
+                )
+            )
+
+            pitch_rms = float(
+                np.sqrt(
+                    np.mean(
+                        pitch_values ** 2
+                    )
+                )
+            )
+
+            if self._benchmark_leg_torque_count > 0:
+                leg_torque_rms = float(
+                    np.sqrt(
+                        self._benchmark_leg_torque_sq_sum
+                        / self._benchmark_leg_torque_count
+                    )
+                )
+            else:
+                leg_torque_rms = 0.0
+
+            if (
+                self._benchmark_leg_saturation_total
+                > 0
+            ):
+                leg_saturation_percent = (
+                    100.0
+                    * self._benchmark_leg_saturation_count
+                    / self._benchmark_leg_saturation_total
+                )
+            else:
+                leg_saturation_percent = 0.0
+
+            benchmark_window = (
+                self._benchmark_samples
+                * self.cfg.policy_dt
+            )
+
+            print(
+                "Benchmark diagnostic: "
+                f"window={benchmark_window:.2f}s, "
+                f"forward mean={forward_mean:+.3f} m/s, "
+                f"std={forward_std:.3f}, "
+                f"error={forward_error:+.3f}, "
+                f"path lateral rms={lateral_rms:.3f} m/s, "
+                f"cross-track rms={cross_track_rms:.3f} m, "
+                f"max={cross_track_max:.3f} m, "
+                f"yaw error rms="
+                f"{np.degrees(yaw_error_rms):.2f} deg, "
+                f"max="
+                f"{np.degrees(yaw_error_max):.2f} deg, "
+                f"roll rms="
+                f"{np.degrees(roll_rms):.2f} deg, "
+                f"pitch rms="
+                f"{np.degrees(pitch_rms):.2f} deg, "
+                f"leg torque rms={leg_torque_rms:.2f} Nm, "
+                f"peak="
+                f"{self._benchmark_leg_torque_peak:.2f} Nm, "
+                f"saturation="
+                f"{leg_saturation_percent:.1f}%"
+            )
+
+        if self._gait_walk_initialized:
+            step_time = self._recent_mean(
+                self._gait_step_times
+            )
+
+            step_length = self._recent_mean(
+                self._gait_step_lengths
+            )
+
+            left_stride_time = self._recent_mean(
+                self._gait_stride_times["L"]
+            )
+
+            right_stride_time = self._recent_mean(
+                self._gait_stride_times["R"]
+            )
+
+            left_stride_length = self._recent_mean(
+                self._gait_stride_lengths["L"]
+            )
+
+            right_stride_length = self._recent_mean(
+                self._gait_stride_lengths["R"]
+            )
+
+            left_stance = self._recent_mean(
+                self._gait_stance_times["L"]
+            )
+
+            right_stance = self._recent_mean(
+                self._gait_stance_times["R"]
+            )
+
+            left_swing = self._recent_mean(
+                self._gait_swing_times["L"]
+            )
+
+            right_swing = self._recent_mean(
+                self._gait_swing_times["R"]
+            )
+
+            stride_length_asymmetry = (
+                self._gait_asymmetry_percent(
+                    left_stride_length,
+                    right_stride_length,
+                )
+            )
+
+            stride_time_asymmetry = (
+                self._gait_asymmetry_percent(
+                    left_stride_time,
+                    right_stride_time,
+                )
+            )
+
+            def format_value(
+                value,
+                scale=1.0,
+                suffix="",
+                digits=2,
+            ):
+                if value is None:
+                    return "n/a"
+
+                return (
+                    f"{value * scale:.{digits}f}"
+                    f"{suffix}"
+                )
+
+            print(
+                "Contact gait diagnostic: "
+                f"contact=L{int(self._gait_contact_state['L'])}"
+                f"/R{int(self._gait_contact_state['R'])}, "
+                f"step time="
+                f"{format_value(step_time, suffix=' s')}, "
+                f"step length="
+                f"{format_value(step_length, 100.0, ' cm', 1)}, "
+                f"L/R stride time="
+                f"{format_value(left_stride_time, suffix=' s')}"
+                f"/"
+                f"{format_value(right_stride_time, suffix=' s')}, "
+                f"L/R stride length="
+                f"{format_value(left_stride_length, 100.0, ' cm', 1)}"
+                f"/"
+                f"{format_value(right_stride_length, 100.0, ' cm', 1)}, "
+                f"L/R stance="
+                f"{format_value(left_stance, suffix=' s')}"
+                f"/"
+                f"{format_value(right_stance, suffix=' s')}, "
+                f"L/R swing="
+                f"{format_value(left_swing, suffix=' s')}"
+                f"/"
+                f"{format_value(right_swing, suffix=' s')}, "
+                f"stride length asym="
+                f"{format_value(stride_length_asymmetry, suffix='%', digits=1)}, "
+                f"stride time asym="
+                f"{format_value(stride_time_asymmetry, suffix='%', digits=1)}"
+            )
+
         if self._foot_metric_samples > 0:
             left_clearance = max(
                 0.0,
@@ -900,6 +1649,7 @@ class MujocoSimulator(MujocoEnv):
             )
 
         self._reset_foot_metric_window()
+        self._reset_benchmark_window()
 
     def _get_observations(self) -> torch.Tensor:
         """Get complete observation vector for the policy.

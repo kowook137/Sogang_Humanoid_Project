@@ -1,6 +1,19 @@
 # Copyright (c) 2025, The Berkeley Humanoid Lite Project Developers.
 
 
+import os
+import platform
+from pathlib import Path
+
+# WSLg may fall back to software rendering unless Mesa's D3D12 driver is
+# selected before MuJoCo creates its OpenGL context.
+if (
+    "microsoft" in platform.release().lower()
+    and Path("/dev/dxg").exists()
+    and Path("/usr/lib/x86_64-linux-gnu/dri/d3d12_dri.so").exists()
+):
+    os.environ.setdefault("GALLIUM_DRIVER", "d3d12")
+
 import numpy as np
 import torch
 
@@ -30,7 +43,7 @@ def main():
     default_actions = np.array(cfg.default_joint_positions, dtype=np.float32)[robot.cfg.action_indices]
 
     # Main control loop
-    while True:
+    while robot.mj_viewer.is_running():
         # Send observations and receive actions
         actions = controller.update(obs.numpy())
 

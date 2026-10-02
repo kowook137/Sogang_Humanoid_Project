@@ -521,3 +521,61 @@ The current PR represents a stable **Sim2Sim locomotion baseline and Sim2Real pr
 - Keep the runtime delay test for future controller validation.
 - Measure actual inference, communication, motor-controller, and actuator latency on hardware.
 - If necessary, perform finer sub-policy-period delay testing or retraining with latency randomization.
+
+---
+
+### 2026-10-02 — Policy-observation sensor-noise robustness validation
+
+**Goal**
+- Evaluate sensitivity of the walking policy to noisy state observations before hardware deployment.
+
+**Method**
+- Injected zero-mean Gaussian noise only into observations supplied to the policy.
+- MuJoCo ground-truth state and low-level PD feedback remained unchanged.
+- Tested:
+  - `0x`: no observation noise
+  - `1x`:
+    - orientation: `0.5 deg RMS`
+    - angular velocity: `1.0 deg/s RMS`
+    - joint position: `0.2 deg RMS`
+    - joint velocity: `2.0 deg/s RMS`
+  - `2x`: twice the above amplitudes
+- Friction remained at `1.0x`.
+- Action delay remained at `0 ms`.
+- Random seed was fixed to `0`.
+
+**Result**
+- `0x`:
+  - forward velocity: approximately `0.403 m/s`
+  - cross-track RMS: approximately `0.097 m`
+  - yaw-error RMS: approximately `3.93 deg`
+  - roll/pitch RMS: approximately `1.21 / 1.78 deg`
+  - torque saturation: approximately `16.6%`
+
+- `1x`:
+  - forward velocity: approximately `0.405 m/s`
+  - cross-track RMS: approximately `0.097 m`
+  - yaw-error RMS: approximately `3.91 deg`
+  - roll/pitch RMS: approximately `1.25 / 1.80 deg`
+  - torque saturation: approximately `16.6%`
+  - gait symmetry remained comparable to the no-noise condition.
+
+- `2x`:
+  - forward velocity: approximately `0.416 m/s`
+  - cross-track RMS: approximately `0.082 m`
+  - yaw-error RMS: approximately `3.24 deg`
+  - roll/pitch RMS: approximately `1.28 / 1.93 deg`
+  - torque saturation: approximately `17.5%`
+  - stride length increased to approximately `22 cm`
+  - stable locomotion was maintained without failure.
+
+**Interpretation**
+- The current policy is relatively insensitive to the tested observation-noise amplitudes.
+- `1x` noise produced negligible degradation relative to the nominal condition.
+- `2x` noise changed gait characteristics slightly, including longer stride length and modestly increased pitch motion and torque saturation, but sustained walking remained stable.
+- Improved path metrics observed in the `2x` run should not be interpreted as a beneficial effect of noise because only one fixed random seed was evaluated.
+
+**Engineering decision**
+- Observation noise is not currently a dominant Sim2Real risk compared with action latency.
+- Keep the runtime noise injection option for future testing.
+- Prioritize dynamics mismatch and real hardware latency validation.

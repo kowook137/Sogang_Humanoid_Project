@@ -212,9 +212,66 @@ class MujocoSimulator(MujocoEnv):
 
         self._action_delay_queue = deque()
 
+        # Optional Sim2Real policy-observation sensor noise.
+        # Noise is injected only into observations sent to the policy.
+        # MuJoCo state and low-level PD feedback remain noise-free.
+        self._sensor_noise_scale = float(
+            os.environ.get(
+                "BHL_SENSOR_NOISE_SCALE",
+                "0.0",
+            )
+        )
+
+        if self._sensor_noise_scale < 0.0:
+            raise ValueError(
+                "BHL_SENSOR_NOISE_SCALE must be non-negative"
+            )
+
+        self._sensor_noise_seed = int(
+            os.environ.get(
+                "BHL_SENSOR_NOISE_SEED",
+                "0",
+            )
+        )
+
+        self._sensor_noise_rng = np.random.default_rng(
+            self._sensor_noise_seed
+        )
+
+        # 1.0x robustness-test noise amplitudes.
+        self._sensor_orientation_sigma = np.deg2rad(
+            0.5
+        ) * self._sensor_noise_scale
+
+        self._sensor_ang_vel_sigma = np.deg2rad(
+            1.0
+        ) * self._sensor_noise_scale
+
+        self._sensor_joint_pos_sigma = np.deg2rad(
+            0.2
+        ) * self._sensor_noise_scale
+
+        self._sensor_joint_vel_sigma = np.deg2rad(
+            2.0
+        ) * self._sensor_noise_scale
+
         print("Policy frequency: ", 1 / self.cfg.policy_dt)
         print("Physics frequency: ", 1 / self.cfg.physics_dt)
         print("Physics substeps: ", self.physics_substeps)
+        print(
+            "Sensor noise robustness: "
+            f"scale={self._sensor_noise_scale:.2f}, "
+            f"orientation="
+            f"{np.degrees(self._sensor_orientation_sigma):.2f} deg, "
+            f"angular velocity="
+            f"{np.degrees(self._sensor_ang_vel_sigma):.2f} deg/s, "
+            f"joint position="
+            f"{np.degrees(self._sensor_joint_pos_sigma):.2f} deg, "
+            f"joint velocity="
+            f"{np.degrees(self._sensor_joint_vel_sigma):.2f} deg/s, "
+            f"seed={self._sensor_noise_seed}"
+        )
+
         print(
             "Action delay robustness: "
             f"requested="
@@ -1773,6 +1830,114 @@ class MujocoSimulator(MujocoEnv):
         self._reset_foot_metric_window()
         self._reset_benchmark_window()
 
+    @staticmethod
+    def _quat_multiply(
+        q1: torch.Tensor,
+        q2: torch.Tensor,
+    ) -> torch.Tensor:
+        """Hamilton product for [w, x, y, z] quaternions."""
+        w1, x1, y1, z1 = q1
+        w2, x2, y2, z2 = q2
+
+        return torch.stack([
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+        ])
+
+    def _apply_policy_sensor_noise(
+        self,
+        base_quat: torch.Tensor,
+        base_ang_vel: torch.Tensor,
+        joint_pos: torch.Tensor,
+        joint_vel: torch.Tensor,
+    ):
+        """Inject Gaussian noise only into policy observations."""
+
+        if self._sensor_noise_scale <= 0.0:
+            return (
+                base_quat,
+                base_ang_vel,
+                joint_pos,
+                joint_vel,
+            )
+
+        # Small random 3-D orientation error.
+        rotation_vector = torch.tensor(
+            self._sensor_noise_rng.normal(
+                0.0,
+                self._sensor_orientation_sigma,
+                size=3,
+            ),
+            dtype=torch.float32,
+        )
+
+        angle = torch.linalg.vector_norm(
+            rotation_vector
+        )
+
+        if float(angle) > 1.0e-12:
+            axis = rotation_vector / angle
+
+            delta_quat = torch.cat([
+                torch.cos(angle / 2.0).reshape(1),
+                axis * torch.sin(angle / 2.0),
+            ])
+
+            base_quat = self._quat_multiply(
+                delta_quat,
+                base_quat,
+            )
+
+            base_quat = (
+                base_quat
+                / torch.linalg.vector_norm(base_quat)
+            )
+
+        base_ang_vel = (
+            base_ang_vel
+            + torch.tensor(
+                self._sensor_noise_rng.normal(
+                    0.0,
+                    self._sensor_ang_vel_sigma,
+                    size=base_ang_vel.numel(),
+                ),
+                dtype=torch.float32,
+            )
+        )
+
+        joint_pos = (
+            joint_pos
+            + torch.tensor(
+                self._sensor_noise_rng.normal(
+                    0.0,
+                    self._sensor_joint_pos_sigma,
+                    size=joint_pos.numel(),
+                ),
+                dtype=torch.float32,
+            )
+        )
+
+        joint_vel = (
+            joint_vel
+            + torch.tensor(
+                self._sensor_noise_rng.normal(
+                    0.0,
+                    self._sensor_joint_vel_sigma,
+                    size=joint_vel.numel(),
+                ),
+                dtype=torch.float32,
+            )
+        )
+
+        return (
+            base_quat,
+            base_ang_vel,
+            joint_pos,
+            joint_vel,
+        )
+
     def _get_observations(self) -> torch.Tensor:
         """Get complete observation vector for the policy.
 
@@ -1852,11 +2017,39 @@ class MujocoSimulator(MujocoEnv):
         self.command_velocity_y = command_velocity_y
         self.command_velocity_yaw = command_velocity_yaw
 
+        base_quat = self._get_base_quat()
+        base_ang_vel = self._get_base_ang_vel()
+        joint_pos = self._get_joint_pos()[
+            self.cfg.action_indices
+        ]
+        joint_vel = self._get_joint_vel()[
+            self.cfg.action_indices
+        ]
+
+        (
+            base_quat,
+            base_ang_vel,
+            joint_pos,
+            joint_vel,
+        ) = self._apply_policy_sensor_noise(
+            base_quat,
+            base_ang_vel,
+            joint_pos,
+            joint_vel,
+        )
+
         return torch.cat([
-            self._get_base_quat(),
-            self._get_base_ang_vel(),
-            self._get_joint_pos()[self.cfg.action_indices],
-            self._get_joint_vel()[self.cfg.action_indices],
-            torch.tensor([self.mode, self.command_velocity_x, self.command_velocity_y, self.command_velocity_yaw],
-                        dtype=torch.float32),
+            base_quat,
+            base_ang_vel,
+            joint_pos,
+            joint_vel,
+            torch.tensor(
+                [
+                    self.mode,
+                    self.command_velocity_x,
+                    self.command_velocity_y,
+                    self.command_velocity_yaw,
+                ],
+                dtype=torch.float32,
+            ),
         ], dim=-1)

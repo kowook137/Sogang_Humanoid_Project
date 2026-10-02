@@ -193,10 +193,18 @@ class MujocoSimulator(MujocoEnv):
         # Ramp the command so starting and stopping remain smooth.
         self._natural_gait_enabled = self.cfg.num_actions == 12
         self._natural_gait_minimum_request = 0.3
-        self._natural_gait_policy_velocity = 0.5
+        self._natural_gait_policy_velocity = 0.3
         self._command_ramp_duration = 0.5
         self._requested_velocity_x = 0.0
         self._smoothed_policy_velocity_x = 0.0
+
+        # Short startup boost only:
+        # leave the standing attractor at 0.40 m/s, then return to 0.30 m/s.
+        self._walk_start_boost_enabled = self.cfg.num_actions == 12
+        self._previous_requested_velocity_x = 0.0
+        self._walk_start_boost_steps = 0
+        self._walk_start_boost_velocity = 0.4
+        self._walk_start_boost_duration = 1.0
 
         action_indices = {int(index) for index in self.cfg.action_indices}
         self._passive_joint_indices = torch.tensor(
@@ -211,10 +219,76 @@ class MujocoSimulator(MujocoEnv):
             1, int(round(2.0 / self.cfg.policy_dt))
         )
 
+        # Foot gait diagnostics.
+        self._foot_body_ids = {
+            "L": mujoco.mj_name2id(
+                self.mj_model,
+                mujoco.mjtObj.mjOBJ_BODY,
+                "leg_left_ankle_roll",
+            ),
+            "R": mujoco.mj_name2id(
+                self.mj_model,
+                mujoco.mjtObj.mjOBJ_BODY,
+                "leg_right_ankle_roll",
+            ),
+        }
+
+        if any(body_id < 0 for body_id in self._foot_body_ids.values()):
+            raise RuntimeError("Could not find ankle-roll bodies for gait diagnostics")
+
+        # Find each foot's collision box.
+        self._foot_geom_ids = {}
+
+        for side, body_id in self._foot_body_ids.items():
+            geom_start = int(self.mj_model.body_geomadr[body_id])
+            geom_count = int(self.mj_model.body_geomnum[body_id])
+
+            box_geoms = [
+                geom_id
+                for geom_id in range(
+                    geom_start,
+                    geom_start + geom_count,
+                )
+                if int(self.mj_model.geom_type[geom_id])
+                == int(mujoco.mjtGeom.mjGEOM_BOX)
+            ]
+
+            if len(box_geoms) != 1:
+                raise RuntimeError(
+                    f"Expected one collision box for foot {side}, "
+                    f"found {box_geoms}"
+                )
+
+            self._foot_geom_ids[side] = box_geoms[0]
+
+        # Flat-ground height.
+        plane_geoms = [
+            geom_id
+            for geom_id in range(self.mj_model.ngeom)
+            if int(self.mj_model.geom_type[geom_id])
+            == int(mujoco.mjtGeom.mjGEOM_PLANE)
+        ]
+
+        if not plane_geoms:
+            raise RuntimeError("Could not find ground plane")
+
+        self._ground_z = float(
+            self.mj_model.geom_pos[plane_geoms[0], 2]
+        )
+
+        print(
+            "Foot collision geoms: "
+            f"L={self._foot_geom_ids['L']}, "
+            f"R={self._foot_geom_ids['R']}, "
+            f"ground z={self._ground_z:.4f}"
+        )
+
+        self._reset_foot_metric_window()
+
         # Hold the direction captured when straight walking begins.
         self._heading_hold_enabled = self.cfg.num_actions == 12
         self._heading_target_yaw = None
-        self._heading_hold_kp = 0.4
+        self._heading_hold_kp = 0.7
         self._heading_hold_kd = 0.05
         self._heading_correction_limit = 0.18
         self._requested_velocity_yaw = 0.0
@@ -246,9 +320,11 @@ class MujocoSimulator(MujocoEnv):
         self._path_heading_limit = np.deg2rad(12.0)
         self._path_heading_offset = 0.0
 
-        # Direct vy correction is disabled because the measured response
-        # moved the robot farther away from the reference line.
-        self._path_lateral_limit = 0.0
+        # Small direct lateral correction in addition to heading control.
+        # Positive cross-track error means the robot is left of the
+        # reference line, so command negative vy to move back right.
+        self._path_lateral_gain = 0.20
+        self._path_lateral_limit = 0.03
 
     def _on_key(self, keycode: int) -> None:
         """Forward MuJoCo viewer key events to the keyboard controller."""
@@ -298,6 +374,7 @@ class MujocoSimulator(MujocoEnv):
             time.sleep(time_until_next_step)
 
         self.n_steps += 1
+        self._update_foot_metrics()
         self._maybe_log_gait_diagnostics()
         return observations
 
@@ -591,9 +668,111 @@ class MujocoSimulator(MujocoEnv):
             )
         )
 
-        # 현재 정책에서는 직접 vy 보정을 사용하지 않습니다.
-        self._path_lateral_command = 0.0
-        return 0.0
+        # Small lateral correction:
+        #   +cross-track = robot is left of the reference line
+        #   -vy          = move robot back toward the right
+        self._path_lateral_command = float(
+            np.clip(
+                -self._path_lateral_gain
+                * self._cross_track_error,
+                -self._path_lateral_limit,
+                self._path_lateral_limit,
+            )
+        )
+
+        return self._path_lateral_command
+
+    def _reset_foot_metric_window(self) -> None:
+        self._foot_clearance_max = {
+            "L": float("-inf"),
+            "R": float("-inf"),
+        }
+        self._foot_clearance_min = {
+            "L": float("inf"),
+            "R": float("inf"),
+        }
+
+        self._foot_forward_min = {
+            "L": float("inf"),
+            "R": float("inf"),
+        }
+        self._foot_forward_max = {
+            "L": float("-inf"),
+            "R": float("-inf"),
+        }
+
+        self._foot_metric_samples = 0
+
+    def _get_foot_clearance(self, side: str) -> float:
+        """Return lowest point of foot collision box above ground."""
+
+        geom_id = self._foot_geom_ids[side]
+
+        center = np.asarray(
+            self.mj_data.geom_xpos[geom_id],
+            dtype=float,
+        )
+
+        rotation = np.asarray(
+            self.mj_data.geom_xmat[geom_id],
+            dtype=float,
+        ).reshape(3, 3)
+
+        half_size = np.asarray(
+            self.mj_model.geom_size[geom_id, :3],
+            dtype=float,
+        )
+
+        # Projection of the oriented box half-extents onto world Z.
+        vertical_half_extent = float(
+            np.sum(np.abs(rotation[2, :]) * half_size)
+        )
+
+        bottom_z = float(center[2] - vertical_half_extent)
+
+        return bottom_z - self._ground_z
+
+    def _update_foot_metrics(self) -> None:
+        if abs(self._requested_velocity_x) < 0.29:
+            self._reset_foot_metric_window()
+            return
+
+        yaw = self._get_heading_yaw()
+        cos_yaw = np.cos(yaw)
+        sin_yaw = np.sin(yaw)
+
+        base_x = float(self.mj_data.qpos[0])
+        base_y = float(self.mj_data.qpos[1])
+
+        for side, body_id in self._foot_body_ids.items():
+            clearance = self._get_foot_clearance(side)
+
+            self._foot_clearance_max[side] = max(
+                self._foot_clearance_max[side],
+                clearance,
+            )
+            self._foot_clearance_min[side] = min(
+                self._foot_clearance_min[side],
+                clearance,
+            )
+
+            foot_pos = self.mj_data.xpos[body_id]
+
+            dx = float(foot_pos[0]) - base_x
+            dy = float(foot_pos[1]) - base_y
+
+            forward = cos_yaw * dx + sin_yaw * dy
+
+            self._foot_forward_min[side] = min(
+                self._foot_forward_min[side],
+                forward,
+            )
+            self._foot_forward_max[side] = max(
+                self._foot_forward_max[side],
+                forward,
+            )
+
+        self._foot_metric_samples += 1
 
     def _maybe_log_gait_diagnostics(self) -> None:
         """Report actual speed and passive-arm loading every two seconds."""
@@ -692,6 +871,36 @@ class MujocoSimulator(MujocoEnv):
             f"base angular speed={base_angular_speed:.2f}"
         )
 
+
+        if self._foot_metric_samples > 0:
+            left_clearance = max(
+                0.0,
+                self._foot_clearance_max["L"],
+            )
+            right_clearance = max(
+                0.0,
+                self._foot_clearance_max["R"],
+            )
+
+            left_fore_aft = (
+                self._foot_forward_max["L"]
+                - self._foot_forward_min["L"]
+            )
+            right_fore_aft = (
+                self._foot_forward_max["R"]
+                - self._foot_forward_min["R"]
+            )
+
+            print(
+                "Foot diagnostic: "
+                f"L clearance={left_clearance * 100.0:.2f} cm, "
+                f"R clearance={right_clearance * 100.0:.2f} cm, "
+                f"L fore-aft={left_fore_aft * 100.0:.1f} cm, "
+                f"R fore-aft={right_fore_aft * 100.0:.1f} cm"
+            )
+
+        self._reset_foot_metric_window()
+
     def _get_observations(self) -> torch.Tensor:
         """Get complete observation vector for the policy.
 
@@ -704,8 +913,56 @@ class MujocoSimulator(MujocoEnv):
         )
 
         self._requested_velocity_x = command_velocity_x
+
+        minimum_velocity = self._natural_gait_minimum_request
+        boost_velocity = self._walk_start_boost_velocity
+
+        crossed_start_threshold = (
+            self._walk_start_boost_enabled
+            and abs(self._requested_velocity_x)
+            >= minimum_velocity - 1.0e-6
+            and abs(self._previous_requested_velocity_x)
+            < minimum_velocity - 1.0e-6
+        )
+
+        if crossed_start_threshold:
+            self._walk_start_boost_steps = max(
+                1,
+                int(
+                    round(
+                        self._walk_start_boost_duration
+                        / self.cfg.policy_dt
+                    )
+                ),
+            )
+            print(
+                "Walk-start boost: "
+                f"requested vx={self._requested_velocity_x:+.2f}, "
+                f"policy vx={np.sign(self._requested_velocity_x) * boost_velocity:+.2f}, "
+                f"duration={self._walk_start_boost_duration:.1f}s"
+            )
+
+        # Normal command is still the true requested velocity (0.30 m/s).
         command_velocity_x = self._get_smoothed_policy_velocity_x(
             command_velocity_x
+        )
+
+        # Override only during the startup window.
+        if (
+            self._walk_start_boost_steps > 0
+            and abs(self._requested_velocity_x)
+            >= minimum_velocity - 1.0e-6
+        ):
+            command_velocity_x = (
+                np.sign(self._requested_velocity_x)
+                * boost_velocity
+            )
+            self._walk_start_boost_steps -= 1
+        elif abs(self._requested_velocity_x) < minimum_velocity - 1.0e-6:
+            self._walk_start_boost_steps = 0
+
+        self._previous_requested_velocity_x = (
+            self._requested_velocity_x
         )
 
         self._requested_velocity_yaw = command_velocity_yaw

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import csv
 import json
+import os
+import subprocess
 import threading
 import webbrowser
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -42,12 +44,28 @@ class Handler(SimpleHTTPRequestHandler):
         return
 
 
+def open_browser(url: str) -> None:
+    """Open the Windows browser from WSL, otherwise use the platform default."""
+    if os.environ.get("WSL_DISTRO_NAME"):
+        try:
+            subprocess.Popen(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "Start-Process", url],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return
+        except OSError:
+            pass
+    if not webbrowser.open(url):
+        print(f"브라우저에서 직접 여세요: {url}")
+
+
 def main() -> None:
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     url = f"http://{HOST}:{PORT}/"
     print(f"녹음 도구: {url}")
     print("종료: 이 터미널에서 Ctrl+C")
-    threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+    threading.Timer(0.5, open_browser, args=(url,)).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

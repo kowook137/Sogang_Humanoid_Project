@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>부산 TTS 자동 녹음</title>
+  <style>
+    :root { font-family: system-ui, sans-serif; color: #17202a; background: #f4f7fb; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; }
+    main { width: min(820px, 92vw); background: white; padding: 30px; border-radius: 18px; box-shadow: 0 10px 35px #0002; }
+    h1 { margin: 0 0 8px; }
+    #progress { color: #52606d; }
+    #filename { font: 700 1.1rem ui-monospace, monospace; color: #075985; }
+    #prompt { min-height: 110px; display: grid; place-items: center; padding: 24px; margin: 18px 0; border-radius: 14px; background: #eef6ff; font-size: clamp(1.3rem, 3vw, 2rem); line-height: 1.55; text-align: center; }
+    .buttons { display: flex; flex-wrap: wrap; gap: 10px; }
+    button { border: 0; border-radius: 10px; padding: 13px 18px; font-size: 1rem; cursor: pointer; }
+    button:disabled { opacity: .45; cursor: default; }
+    #folder { background: #e5e7eb; }
+    #record { background: #dc2626; color: white; }
+    #stop { background: #111827; color: white; }
+    #prev, #next { background: #dbeafe; }
+    #status { margin-top: 16px; min-height: 24px; }
+    .recording { color: #dc2626; font-weight: 700; }
+    .saved { color: #15803d; font-weight: 700; }
+    audio { width: 100%; margin-top: 14px; }
+    small { display: block; margin-top: 14px; color: #64748b; line-height: 1.5; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>부산 TTS 자동 녹음</h1>
+  <div id="progress">불러오는 중…</div>
+  <div id="filename"></div>
+  <div id="prompt"></div>
+  <div class="buttons">
+    <button id="folder">① 저장 폴더 선택</button>
+    <button id="record">② 녹음 시작</button>
+    <button id="stop" disabled>③ 중지·자동 저장</button>
+    <button id="prev">이전</button>
+    <button id="next">다음</button>
+  </div>
+  <div id="status"></div>
+  <audio id="preview" controls hidden></audio>
+  <small>중지를 누르면 현재 번호의 WAV로 자동 저장되고 다음 문장으로 넘어갑니다. 다시 녹음하면 같은 파일을 덮어씁니다. Edge 또는 Chrome을 권장합니다.</small>
+</main>
+<script>
+let prompts = [], index = 0, directory = null;
+let context, stream, source, processor, mute, buffers = [], sampleRate = 48000, previewUrl;
+const $ = id => document.getElementById(id);
+
+async function loadPrompts() {
+  const rows = await fetch('/prompts.json').then(r => {
+    if (!r.ok) throw new Error('대본을 불러오지 못했습니다.');
+    return r.json();
+  });
+  prompts = [{
+    id: 'busan_reference',
+    text: '오늘은 바람이 참 시원하네요. 밥은 드셨어요? 저는 잠깐 동네 한 바퀴 걷고 와서, 따뜻한 차 한 잔 마시려고요.'
+  }, ...rows];
+  render();
+}
+
+function render() {
+  const item = prompts[index];
+  $('progress').textContent = `${index + 1} / ${prompts.length}`;
+  $('filename').textContent = `${item.id}.wav`;
+  $('prompt').textContent = item.text;
+  $('prev').disabled = index === 0 || !!processor;
+  $('next').disabled = index === prompts.length - 1 || !!processor;
+}
+
+async function chooseFolder() {
+  if (!window.showDirectoryPicker) {
+    $('status').textContent = '폴더 직접 저장을 지원하지 않아 다운로드 폴더에 자동 저장합니다.';
+    return;
+  }
+  directory = await window.showDirectoryPicker({ mode: 'readwrite' });
+  $('status').className = 'saved';
+  $('status').textContent = `저장 폴더 선택 완료: ${directory.name}`;
+}
+
+async function startRecording() {
+  stream = await navigator.mediaDevices.getUserMedia({ audio: {
+    channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false
+  }});
+  context = new AudioContext();
+  sampleRate = context.sampleRate;
+  source = context.createMediaStreamSource(stream);
+  processor = context.createScriptProcessor(4096, 1, 1);
+  mute = context.createGain();
+  mute.gain.value = 0;
+  buffers = [];
+  processor.onaudioprocess = event => buffers.push(new Float32Array(event.inputBuffer.getChannelData(0)));
+  source.connect(processor);
+  processor.connect(mute);
+  mute.connect(context.destination);
+  $('record').disabled = true;
+  $('stop').disabled = false;
+  $('folder').disabled = true;
+  $('status').className = 'recording';
+  $('status').textContent = '● 녹음 중입니다…';
+  render();
+}
+
+function encodeWav(chunks, rate) {
+  const length = chunks.reduce((n, chunk) => n + chunk.length, 0);
+  const buffer = new ArrayBuffer(44 + length * 2);
+  const view = new DataView(buffer);
+  const text = (offset, value) => [...value].forEach((c, i) => view.setUint8(offset + i, c.charCodeAt(0)));
+  text(0, 'RIFF'); view.setUint32(4, 36 + length * 2, true); text(8, 'WAVE'); text(12, 'fmt ');
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, rate, true); view.setUint32(28, rate * 2, true); view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true); text(36, 'data'); view.setUint32(40, length * 2, true);
+  let offset = 44;
+  for (const chunk of chunks) for (let sample of chunk) {
+    sample = Math.max(-1, Math.min(1, sample));
+    view.setInt16(offset, sample < 0 ? sample * 32768 : sample * 32767, true);
+    offset += 2;
+  }
+  return new Blob([buffer], { type: 'audio/wav' });
+}
+
+async function saveBlob(blob, filename) {
+  if (directory) {
+    const handle = await directory.getFileHandle(filename, { create: true });
+    const writable = await handle.createWritable();
+    await writable.write(blob);
+    await writable.close();
+  } else {
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = filename;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 2000);
+  }
+}
+
+async function stopRecording() {
+  const item = prompts[index];
+  processor.disconnect(); source.disconnect(); mute.disconnect();
+  stream.getTracks().forEach(track => track.stop());
+  await context.close();
+  processor = source = mute = stream = context = null;
+  const blob = encodeWav(buffers, sampleRate);
+  await saveBlob(blob, `${item.id}.wav`);
+  if (previewUrl) URL.revokeObjectURL(previewUrl);
+  previewUrl = URL.createObjectURL(blob);
+  $('preview').src = previewUrl;
+  $('preview').hidden = false;
+  $('status').className = 'saved';
+  $('status').textContent = `저장 완료: ${item.id}.wav`;
+  $('record').disabled = false;
+  $('stop').disabled = true;
+  $('folder').disabled = false;
+  if (index < prompts.length - 1) index += 1;
+  render();
+}
+
+$('folder').onclick = () => chooseFolder().catch(e => $('status').textContent = e.message);
+$('record').onclick = () => startRecording().catch(e => $('status').textContent = `마이크 오류: ${e.message}`);
+$('stop').onclick = () => stopRecording().catch(e => $('status').textContent = `저장 오류: ${e.message}`);
+$('prev').onclick = () => { if (index > 0) index -= 1; render(); };
+$('next').onclick = () => { if (index < prompts.length - 1) index += 1; render(); };
+loadPrompts().catch(e => $('status').textContent = e.message);
+</script>
+</body>
+</html>

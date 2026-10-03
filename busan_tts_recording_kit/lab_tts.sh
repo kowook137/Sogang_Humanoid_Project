@@ -45,7 +45,8 @@ status() {
   echo "===== 녹음 ====="
   printf 'WAV: %s/50\n' "$(count_files "$SCRIPT_DIR/recordings/raw" 'busan_*.wav')"
   printf '검수 완료 행: '
-  awk -F, 'NR > 1 && $6 == "ready" && $7 == "true" {n++} END {print n+0}' "$SCRIPT_DIR/recording_manifest.csv"
+  python3 -c 'import csv,sys; print(sum(r["status"] == "ready" and r["transcript_verified"] == "true" for r in csv.DictReader(open(sys.argv[1], encoding="utf-8-sig", newline=""))))' \
+    "$SCRIPT_DIR/recording_manifest.csv"
   echo "===== GPT-SoVITS ====="
   if [[ -d "$GPT_DIR/.git" ]]; then
     printf '경로: %s\n' "$GPT_DIR"

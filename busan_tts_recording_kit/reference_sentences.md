@@ -11,3 +11,11 @@
 원본: recordings/reference/busan_reference.m4a 또는 WAV
 정확히 말한 대본: recordings/reference/busan_reference.txt
 말을 바꾸었으면 텍스트도 실제 발화대로 바꾸세요.
+
+## 현재 학습에서 사용할 기준 음성
+
+- 파일: `recordings/raw/busan_004.wav`
+- 길이: 약 7.25초
+- 대본: `시장에 갔더니 싱싱한 고등어하고 무가 많이 나왔더라고요.`
+
+별도 `busan_reference.wav`는 12.46초라 3~10초 기준을 넘어 우선 사용하지 않습니다.
